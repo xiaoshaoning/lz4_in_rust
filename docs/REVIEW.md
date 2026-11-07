@@ -30,6 +30,25 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 | F11 | `Level::acceleration()` 公开，但对高压缩档位没有意义（照样返回 1），调用方可能误用 | Overexposure | 改为私有；测试改成断言 `Level::new(1) == Level::FAST` |
 | F12 | `block::compress_into(acceleration)` 与 `level::compress_into(Level)` 是两个公开的"使劲程度"入口，文档互不指认 | 两处说同一件事，读者要自己判断用哪个 | `block` 的文档加一句"多数调用方要 `crate::level`；这里是 `--fast=N` 对应的裸旋钮" |
 
+第三轮评审（frame 落地之后，针对此前未评审过的 `src/frame.rs`、`tests/frame_interop.rs`、
+`tools/` 的 frame 部分）：
+
+| # | 问题 | 红标 | 处置 |
+|---|---|---|---|
+| F13 | **一个 15 字节的恶意帧可以让解码器 panic**：descriptor 里声明的 `content_size` 被直接交给 `Vec::with_capacity`，`u64::MAX` 触发 "capacity overflow"，进程直接崩。这违反了 crate 的公开承诺（"任何输入只会得到 `Err`，不会 panic"） | 不可信输入被当成分配请求（信任边界破口） | 声明值只作提示：`with_capacity(declared.min(1 MiB))`，超出部分靠增长；仍保留"内容大小与声明不符 → `InvalidFrame`"的校验。回归测试 `huge_declared_content_size_is_not_an_allocation_request` |
+| F14 | 没有任何"任意字节都不 panic"的测试；F13 正是这类测试能抓到的 | 测试缺口 | 新增 `arbitrary_bytes_never_panic`：0/1/4/7/15/40/200/1000 字节的随机输入各 64 组，外加对合法帧做 500 次随机单比特破坏 |
+| F15 | `frame::Opts` 同时装着格式偏好和 `par` 的旋钮（`level`/`workers`/`memory_budget`），文档没说为什么 | 读者要在两处猜"这块该谁管" | 文档写明：frame 是"格式 + 块编解码"的组合点，所以两者在这里汇合；`par::Opts` 由这里构造，避免它的 block size 与帧的块大小打架 |
+
+第三轮**只记录、不修**的小问题（工具/性能，不影响正确性）：
+
+- `tools/c_oracle.c` 的 `unframe` 在错误路径上没调 `LZ4F_freeDecompressionContext`（工具里的
+  泄漏，无所谓；真要干净就在每个 `return 1` 前清一次）。
+- `frame::decompress` 每块都 `resize(start + block_size)` 到恰好大小，于是**每个满块的最后
+  ~32 字节走的是精确拷贝路径**而不是宽搬运（解码器要求 `end + 32 <= dst.len()`）。块长
+  4 MiB/64 KiB 时这点比例可以忽略，所以不动；只有将来做流式解码、块很多时再看。
+- `frame::decompress` 只解码第一帧并返回 `consumed`，多帧遍历靠调用方循环；这是有意的
+  接口选择（`Decoded.consumed` 就是为此存在），等 CLI 需要 `--list` 时再考虑加 helper。
+
 ---
 
 ## 二、计划清单（待办）

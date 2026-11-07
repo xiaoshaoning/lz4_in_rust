@@ -38,6 +38,8 @@ const SKIPPABLE_START: u32 = 0x184D_2A50;
 const BLOCK_UNCOMPRESSED: u32 = 0x8000_0000;
 /// Version this implementation reads and writes (`01` in the top two flag bits).
 const VERSION: u8 = 0x40;
+/// Upper bound on the memory reserved up front from the descriptor's content size.
+const RESERVE_HINT: u64 = 1 << 20;
 
 /// Whether a block may reference the 64 KiB decoded before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +63,11 @@ pub struct FrameInfo {
 
 /// What to write (the read side returns [`FrameInfo`] instead: same fields, different
 /// meaning — `content_size` here is "declare it", there it is "it was declared").
+///
+/// It carries the codec knobs as well (`level`, `workers`, `memory_budget`) because a
+/// frame *is* the composition point of the format and the block codec: this way callers
+/// set both in one place, and `par::Opts` is built from here instead of being passed in
+/// parallel (where its block size could disagree with the frame's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opts {
     pub block_size: usize,
@@ -264,7 +271,10 @@ pub fn decompress(src: &[u8]) -> Result<Decoded, Error> {
         ));
     }
 
-    let mut content = Vec::with_capacity(content_size.unwrap_or(0) as usize);
+    // A declared content size is a claim about the data, not an allocation request: a
+    // 15-byte frame saying 2^64-1 must not make us reserve 2^64-1 (that panics with
+    // "capacity overflow"). Reserve a sane amount and let growth do the rest.
+    let mut content = Vec::with_capacity(content_size.unwrap_or(0).min(RESERVE_HINT) as usize);
     let mut digest = Xxh32::new(0);
 
     loop {
@@ -623,6 +633,55 @@ mod tests {
                 "content is larger than the descriptor says"
             ))
         ));
+    }
+
+    /// Regression: a declared content size used to be handed straight to `with_capacity`,
+    /// so a tiny hostile frame could abort the process with "capacity overflow".
+    #[test]
+    fn huge_declared_content_size_is_not_an_allocation_request() {
+        let mut frame = compress(
+            &corpus(100),
+            &Opts {
+                content_size: true,
+                ..opts(0x1_0000, BlockMode::Independent)
+            },
+        )
+        .unwrap();
+        frame[6..14].copy_from_slice(&u64::MAX.to_le_bytes());
+        frame[14] = header_checksum(&frame[4..14]);
+        assert!(matches!(
+            decompress(&frame),
+            Err(Error::InvalidFrame(
+                "content size does not match the descriptor"
+            ))
+        ));
+    }
+
+    /// Whatever the input is, decoding returns a value: no panic, no hang, no allocation
+    /// request taken from the data.
+    #[test]
+    fn arbitrary_bytes_never_panic() {
+        let valid = compress(&corpus(3000), &opts(0x1_0000, BlockMode::Linked)).unwrap();
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut byte = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        };
+        for len in [0usize, 1, 4, 7, 15, 40, 200, 1000] {
+            for _ in 0..64 {
+                let candidate: Vec<u8> = (0..len).map(|_| byte()).collect();
+                let _ = decompress(&candidate);
+            }
+        }
+        // and mutated copies of a valid frame, which get further into the parser
+        for _ in 0..500 {
+            let mut broken = valid.clone();
+            let at = (byte() as usize * 7 + byte() as usize) % broken.len();
+            broken[at] ^= 1 << (byte() % 8);
+            let _ = decompress(&broken);
+        }
     }
 
     #[test]
