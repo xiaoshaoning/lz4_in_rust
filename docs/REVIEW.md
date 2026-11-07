@@ -52,6 +52,21 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 | F22 | `examples/parallel_probe.rs` 报的是**平均值**（总时间/轮数），而 `DESIGN.md` §5 写的方法论是"取最小"；这台机器上两者差到 2 倍。而且它只测了收集型 `compress`，`frame` 实际用的是 `compress_each` | 工具与文档不一致，测的不是发布路径 | 改成逐轮取最小；新增一行 `compress_each (Auto, streaming)` 的结果 |
 | F23 | `build_oracle.sh` 头部没说清哪些 fixture 是**提交的输入**、哪些是生成的（`random.raw`、`frame/large.raw` 不可复现） | 文档缺失 | 头部写明 |
 
+第五轮评审（`tests/fuzz_diff.rs`、`cli/` 整个 crate、workspace 接线 —— 都是 pass 4 之后写的）：
+
+| # | 问题 | 红标 | 处置 |
+|---|---|---|---|
+| F24 | **`lz4r` 不带参数时会挂在 stdin 上**（终端里看起来像死机），而且会往终端里吐压缩后的二进制。lz4 本身两条都拒绝 | 非交互场景的默认行为错；用户看不到发生了什么 | 新增 `check_terminals()`（纯函数，可单测）：无输入 + stdin 是终端 → 报错；压缩结果写终端 → 报错；`-f` 可越过。`is_terminal()` 在 MSRV 1.75 内 |
+| F25 | `-c` 同时给了输出文件名时**静默忽略**该名字，用户以为写了文件 | 静默丢弃用户输入 | 打到 stderr 的警告："-c writes to stdout; the output name is ignored" |
+| F26 | `decompress_all` 的循环靠 `consumed` 前进；若某天解码器返回 0 就是死循环 | 潜在挂死（当前不可能发生，但没有守卫） | 加一行守卫 → `Err("decoder made no progress")` |
+| F27 | `tests/fuzz_diff.rs` 里 `Fixture.dir` 字段没人读，靠 `let _ = &fx.dir;` 压警告；辅助函数叫 `main_oracle`（它不是 main） | 垃圾字段 + 掩耳盗铃的写法 + 误导的名字 | 删字段、删那行、改名 `oracle_path` |
+| F28 | release 时版本号写在两个 `Cargo.toml` 里（改动放大） | Change amplification | `[workspace.package] version`/`rust-version`，两个 crate 用 `version.workspace = true`；许可证仍按 crate 分开（BSD vs GPL，这是有意不同） |
+
+第五轮**核实过、没问题**的两件事：
+
+- `cli/` **不会**被打进根 crate 的发布包（`cargo package --list` 里 0 个 `cli/` 条目），Cargo 自动排除 workspace 成员——所以不需要额外 `exclude`。
+- 端到端测试用的 `target/cli-tests/<name>` 目录天然隔离（每个测试一个子目录），并行跑不打架。
+
 第三轮**只记录、不修**的小问题（工具/性能，不影响正确性）：
 
 - `tools/c_oracle.c` 的 `unframe` 在错误路径上没调 `LZ4F_freeDecompressionContext`（工具里的

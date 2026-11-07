@@ -15,7 +15,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -294,7 +294,28 @@ fn default_output(input: &Path, mode: Mode) -> Result<PathBuf, String> {
 
 // ---------------------------------------------------------------- doing it
 
+/// The two console rules, as a pure function so they can be tested without a terminal:
+/// reading a file from a keyboard looks like a hang, and compressed bytes on a console
+/// are unreadable garbage (and can wedge some terminals).
+fn check_terminals(cmd: &Cmd, stdin_is_tty: bool, stdout_is_tty: bool) -> Result<(), String> {
+    if cmd.input.is_none() && stdin_is_tty && !cmd.force {
+        return Err("no input given, and stdin is a terminal (see -h)".to_string());
+    }
+    let writes_stdout =
+        cmd.to_stdout || cmd.output.as_deref().map_or(true, |p| p.as_os_str() == "-");
+    if writes_stdout && stdout_is_tty && cmd.mode == Mode::Compress && !cmd.force {
+        return Err(
+            "refusing to write compressed data to a console; use -f or redirect".to_string(),
+        );
+    }
+    if cmd.to_stdout && cmd.output.is_some() && cmd.output.as_deref() != Some(Path::new("-")) {
+        eprintln!("lz4r: warning: -c writes to stdout; the output name is ignored");
+    }
+    Ok(())
+}
+
 fn run(cmd: &Cmd) -> Result<(), String> {
+    check_terminals(cmd, io::stdin().is_terminal(), io::stdout().is_terminal())?;
     let data = read_input(cmd)?;
 
     match cmd.mode {
@@ -333,6 +354,9 @@ fn decompress_all(data: &[u8]) -> Result<Vec<u8>, String> {
     while pos < data.len() {
         let decoded = frame::decompress(&data[pos..]).map_err(|e| format!("{e}"))?;
         out.extend_from_slice(&decoded.content);
+        if decoded.consumed == 0 {
+            return Err("decoder made no progress".to_string());
+        }
         pos += decoded.consumed;
         frames += 1;
     }
@@ -523,6 +547,27 @@ mod tests {
         assert!(parse_str(&["-B3", "f"]).is_err(), "block size id 3");
         assert!(parse_str(&["-T", "f"]).is_err(), "-T without a number");
         assert!(parse_str(&["a", "b", "c"]).is_err(), "three files");
+    }
+
+    #[test]
+    fn console_rules() {
+        let c = cmd(&["-c"]);
+        // reading a file from a keyboard would look like a hang
+        assert!(check_terminals(&c, true, false).is_err());
+        assert!(check_terminals(&c, false, false).is_ok());
+        // ... unless the user insists
+        let c = cmd(&["-c", "-f"]);
+        assert!(check_terminals(&c, true, false).is_ok());
+
+        // compressed bytes on a console are refused, decompressed text is allowed
+        let c = cmd(&["-c", "in"]);
+        assert!(check_terminals(&c, false, true).is_err());
+        assert!(check_terminals(&c, false, false).is_ok());
+        let c = cmd(&["-d", "-c", "in.lz4"]);
+        assert!(check_terminals(&c, false, true).is_ok());
+        // a file output never touches the console
+        let c = cmd(&["in", "out.lz4"]);
+        assert!(check_terminals(&c, false, true).is_ok());
     }
 
     #[test]

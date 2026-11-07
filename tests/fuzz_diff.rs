@@ -56,7 +56,7 @@ const SIZES: [usize; 12] = [
     0, 1, 4, 12, 13, 64, 4096, 65_535, 65_547, 65_548, 100_000, 300_000,
 ];
 
-fn main_oracle() -> Option<PathBuf> {
+fn oracle_path() -> Option<PathBuf> {
     let path = std::env::var_os("LZ4_C_ORACLE")?;
     let path = PathBuf::from(path);
     if !path.exists() {
@@ -143,7 +143,6 @@ fn oracle_run(oracle: &Path, args: &[&OsStr]) -> bool {
 
 struct Fixture<'a> {
     oracle: &'a Path,
-    dir: PathBuf,
     raw: PathBuf,
     packed: PathBuf,
     back: PathBuf,
@@ -302,7 +301,7 @@ fn run_case(fx: &Fixture, kind: Kind, len: usize, seed: u64) {
 
 #[test]
 fn differential_fuzz_against_c() {
-    let Some(oracle) = main_oracle() else {
+    let Some(oracle) = oracle_path() else {
         eprintln!(
             "LZ4_C_ORACLE unset: skipping the differential fuzz ({} cases).\n\
              build it with tools/build_oracle.sh, then: LZ4_C_ORACLE=target/c-oracle cargo test --release",
@@ -326,7 +325,6 @@ fn differential_fuzz_against_c() {
         raw: dir.join("case.raw"),
         packed: dir.join("case.lz4"),
         back: dir.join("case.back"),
-        dir,
     };
 
     let mut cases = 0usize;
@@ -351,7 +349,6 @@ fn differential_fuzz_against_c() {
         run_case(&fx, kind, len, rng.next());
         cases += 1;
     }
-    let _ = &fx.dir;
     eprintln!("differential fuzz: {cases} cases passed (seed {seed:#x})");
     assert!(cases >= SIZES.len() * KINDS.len());
 }
@@ -360,7 +357,7 @@ fn differential_fuzz_against_c() {
 /// count — the property the whole `par` design rests on, checked on generated data.
 #[test]
 fn parallel_blocks_agree_with_c() {
-    let Some(oracle) = main_oracle() else {
+    let Some(oracle) = oracle_path() else {
         eprintln!("LZ4_C_ORACLE unset: skipping");
         return;
     };

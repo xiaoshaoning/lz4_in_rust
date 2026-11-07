@@ -1,8 +1,8 @@
 [package]
 name = "lz4_in_rust"
-version = "0.0.1"
+version.workspace = true
 edition = "2021"
-rust-version = "1.75"
+rust-version.workspace = true
 description = "A zero-unsafe, byte-identical Rust port of LZ4 (block format, high compression, frame)"
 license = "BSD-2-Clause"
 readme = "README.md"
@@ -14,5 +14,10 @@ exclude = ["/target", "/tools", "/.github"]
 [workspace]
 members = ["cli"]
 resolver = "2"
+
+# one place to bump for a release; the license stays per crate on purpose
+[workspace.package]
+version = "0.0.1"
+rust-version = "1.75"
 
 [dependencies]

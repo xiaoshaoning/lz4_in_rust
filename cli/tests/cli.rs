@@ -63,7 +63,6 @@ impl Case {
             ok: out.status.success(),
             stdout: out.stdout,
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            code: out.status.code().unwrap_or(-1),
         }
     }
 }
@@ -72,8 +71,6 @@ struct Output {
     ok: bool,
     stdout: Vec<u8>,
     stderr: String,
-    #[allow(dead_code)]
-    code: i32,
 }
 
 const TEXT: &[u8] = b"the quick brown fox jumps over the lazy dog, and again, and again";

@@ -1,8 +1,8 @@
 [package]
 name = "lz4r"
-version = "0.0.1"
+version.workspace = true
 edition = "2021"
-rust-version = "1.75"
+rust-version.workspace = true
 description = "A command line tool for LZ4 (.lz4 files), ported from the reference `lz4` tool"
 # Derived from upstream programs/ (lz4cli.c, lz4io.c), which is GPL-2.0-or-later,
 # unlike the library crate at the repository root (BSD-2-Clause). See COPYING.
