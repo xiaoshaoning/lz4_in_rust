@@ -54,8 +54,9 @@ pub fn compress_bound(src_len: usize) -> usize {
 
 /// Compress `src` into `dst`, returning the compressed size.
 ///
-/// `acceleration` is the reference's "step faster" knob: 1 is the default effort,
-/// larger values skip more input bytes and are proportionally faster and coarser.
+/// `acceleration` is the reference's raw "step faster" knob: 1 is the default effort,
+/// larger values skip more input bytes and are proportionally faster and coarser. Most
+/// callers want [`crate::level`] instead, which is the `lz4 -1..-12` scale this maps onto.
 /// `dst.len()` must be at least [`compress_bound`]`(src.len())`.
 pub fn compress_into(src: &[u8], dst: &mut [u8], acceleration: u32) -> Result<usize, Error> {
     let src_len = src.len();

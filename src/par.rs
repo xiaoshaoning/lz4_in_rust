@@ -138,8 +138,11 @@ fn available_workers() -> usize {
 
 /// The adaptive part: given observed throughput, decide how many workers to keep.
 ///
-/// Within one call it can only *shrink* (the threads are already spawned); growth happens
-/// between calls, which is where a new plan starts from the last measured best.
+/// It can only *shrink*, within one call — the threads are already spawned — and it needs
+/// at least two sampling windows before it ever acts, so `Auto` on an input of a few
+/// windows is simply the plan's `k0` (see `docs/REVIEW.md` R7 for the stateful version
+/// that would also grow and would let the next call start from the last measured best;
+/// this API is stateless, so nothing carries a measurement across calls).
 #[derive(Debug)]
 struct Control {
     k: usize,
@@ -160,6 +163,9 @@ impl Control {
             k_hi: workers,
             best: 0.0,
             cooldown: 0,
+            // a window is deliberately large (>= 8 blocks, >= 8 MiB) so that one noisy
+            // sample cannot move the worker count; the price is that an input smaller
+            // than ~2 windows keeps `k0` for its whole run
             window: (8 * plan.block_size).max(8 << 20),
             bytes: 0,
             secs: 0.0,

@@ -27,7 +27,7 @@ legacy frame（`lz4 -l`，旧 v1 格式）**只做解码**，不做编码——�
     │  只依赖 block 的两个函数
   block    token / offset / 扩展长度 / 64K 与 64K 以上的表形切换
     │
-  hc       hash chain + optimal parser（levels 3..12）
+  hc       hash chain + optimal parser（levels 2..12；10..12 走 optimal）
   xxhash   XXH32（frame 的 header/block/content 校验）
 ```
 
@@ -119,7 +119,7 @@ offset 16..32 用 2×16 字节、8..16 用 4×8 字节（每次读的源都已�
 | `block::compress_into` | ✅ 逐字节等于 C（level 0 / acceleration 任意） |
 | `level` | ✅ `-1..-12` → 解析器的唯一映射（`src/level.rs`，4 个单测） |
 | `par`（并行块引擎 + 自适应线程数） | ✅ `plan`/`Control` 纯函数 + 池 + 按序流式交付；15 个单测 |
-| `hc`（3..=12） | ⬜ M3 |
+| `hc`（2..=12） | ⬜ M3 |
 | `frame` | ⬜ M4 |
 | CLI | ⬜ M5 |
 
@@ -160,7 +160,7 @@ offset 16..32 用 2×16 字节、8..16 用 4×8 字节（每次读的源都已�
 | M0 ✅ | crate 骨架 + C 差分脚手架 + `xxh32` | `cargo test` 绿；xxh32 与 C 判等 |
 | M1 ✅ | `block::decompress_into` | 解 C 全部语料；损坏输入不 panic |
 | M2 ✅ | `block::compress_into` + `compress_bound` | 与 C **逐字节相同**；C 能解我们的输出 |
-| M3 | `hc` 3..=9（hash chain + 贪心），再做 10..=12（optimal parser + 价格表） | `-9`/`-12` 输出与 C 逐字节相同 |
+| M3 | `hc` 2..=9（hash chain + 贪心），再做 10..=12（optimal parser + 价格表） | `-9`/`-12` 输出与 C 逐字节相同；`-2` 起进 HC（`LZ4HC_CLEVEL_MIN = 2`） |
 | M4a ✅ | `par`：并行块引擎 + 策略（`plan` / `Control` / 池） | 输出与线程数无关；小主机/小块/小输入自动单线程；见 §9 |
 | M4b | `frame`：header/flags/block size/XXH32/多块/linked block/`--content-size`，复用 `par` | `lz4`/`lz4 -d` 双向互通，输出与 C 逐字节相同 |
 | M5 | CLI：`-1..-12`、`-d`、`-c`、`-t`、`-B#`、`--list` | 能替代日常 `lz4`；`lz4 -t` 通过 |

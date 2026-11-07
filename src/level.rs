@@ -38,13 +38,12 @@ impl Level {
         self.0 < Level::FIRST_HIGH
     }
 
-    /// Acceleration for the fast parser.
-    ///
-    /// The reference maps every non-negative level to 1 — `lz4 -1` and `lz4 -2` differ
-    /// because the second one is *not* fast, not because it accelerates differently.
-    /// Faster-than-default settings come from `--fast=N`, which is the separate knob
-    /// [`block::compress_into`] exposes (the frame format has no room for it).
-    pub fn acceleration(self) -> u32 {
+    /// Acceleration for the fast parser — private, because it is not a second knob for
+    /// callers: the reference maps every non-negative level to 1, so `lz4 -1` and `lz4 -2`
+    /// differ because the second one is *not* fast, not because it accelerates differently.
+    /// Faster-than-default settings come from `--fast=N`, which is the raw knob
+    /// [`block::compress_into`] exposes.
+    fn acceleration(self) -> u32 {
         1
     }
 }
@@ -88,7 +87,7 @@ mod tests {
         assert!(Level::new(1).unwrap().is_fast());
         assert!(!Level::new(2).unwrap().is_fast());
         assert!(!Level::new(12).unwrap().is_fast());
-        assert_eq!(Level::new(1).unwrap().acceleration(), 1);
+        assert_eq!(Level::new(1).unwrap(), Level::FAST);
     }
 
     /// The mapping must be the identity for the fast tier: `lz4 -1` is

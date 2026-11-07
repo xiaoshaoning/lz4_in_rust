@@ -20,6 +20,16 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 | F6 | `decompress_into` 的**公开**文档里写实现细节（"96% 的匹配 ≤ 32 字节…"） | Implementation docs contaminate interface | 移进函数体的 `// Performance:`；接口注释只留契约 |
 | F7 | `TABLE_SIZE` 没说明为什么是 8192（`byU16` 需要，`byU32` 只用一半） | 注释缺失 | 补一行说明 |
 
+第二轮评审（R1/R2 落地之后，针对新代码）：
+
+| # | 问题 | 红标 | 处置 |
+|---|---|---|---|
+| F8 | `Control` 的文档写"growth happens between calls, which is where a new plan starts from the last measured best" —— **代码里没有任何东西跨调用保留 `best`**（每次 `Control::new` 都从 0.0 开始），文档描述了一个不存在的设计 | 注释描述了不存在的结构（比没注释更糟） | 文档改为"只能降、且需要 ≥2 个采样窗口才会动"；"跨调用持久化"登记为 R7 |
+| F9 | 采样窗口是 `max(8×blockSize, 8 MiB)`（4 MiB 块 → 32 MiB），因此**输入小于约 64 MiB 时永远拿不到两个样本**，`Auto` 等于 `k0`（我自己 32 MiB 的基准语料正是这种情况）。DESIGN 只写了"每 32 MB 采样一次"，没写这个后果 | 策略的后果没写在代码旁边 | 在 `window` 处注明代价；REVIEW 记录；不缩小窗口（噪声免疫更值钱） |
+| F10 | `DESIGN.md` 三处仍写 HC = "levels 3..12"/"3..=9"，而 R1 之后代码里 HC 从 **2** 开始（`LZ4HC_CLEVEL_MIN`）。文档与代码矛盾 | 文档漂移 = unknown unknown | 改成 2..=12（贪心 2..=9，optimal 10..=12），三处一并修 |
+| F11 | `Level::acceleration()` 公开，但对高压缩档位没有意义（照样返回 1），调用方可能误用 | Overexposure | 改为私有；测试改成断言 `Level::new(1) == Level::FAST` |
+| F12 | `block::compress_into(acceleration)` 与 `level::compress_into(Level)` 是两个公开的"使劲程度"入口，文档互不指认 | 两处说同一件事，读者要自己判断用哪个 | `block` 的文档加一句"多数调用方要 `crate::level`；这里是 `--fast=N` 对应的裸旋钮" |
+
 ---
 
 ## 二、计划清单（待办）
@@ -52,7 +62,8 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
   "本移植还没有"（如 HC 未移植）。
   **验收**：frame 的错误测试按变体匹配，而不是匹配字符串。
 
-- [ ] **R4 两段 worker 骨架重复**（compress：原子游标 + join 回收；decompress：mutex 栈原地写）
+- [ ] **R4 两段 worker 骨架重复**（compress：原子游标 + join 回收；decompress：mutex 栈原地写）。
+  合并时顺手把 `Control.k` 拆成 `AtomicUsize`：现在它与统计量共用一把锁，每个 worker 每块都要抢一次锁只为读一个数。
   队列形状不同是**有理由的**（压缩不能预分配全部输出块，否则破坏内存预算），但
   "admit k / 计时 / report / join / 取消"这套骨架可以合成一个 `Scheduler`。
   **修法**：把 `Control` 收进一个 `Scheduler`（`admit(id) -> bool`、`report(bytes, secs)`、
@@ -70,6 +81,15 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
   CLI 帮助文本确实要用，但应在文档里声明它们是**策略**，不是调用方可调的旋钮；
   若要可调，就统一成 `Opts` 的字段。
   **验收**：`par` 的模块文档明确"这些是策略常量"。
+
+- [ ] **R7 自适应只在单次调用内生效**（F8 暴露的真缺口）
+  现在：`Control` 每次调用新建，`best` 不跨调用；只能降、不能升。
+  要做到文档原先声称的行为，需要**有状态的控制器**：`Opts` 是 `Copy`/无状态的，所以要么
+  让 `par::compress_each` 接受 `&mut Adaptation`（frame 编码器持有它，跨块/跨文件复用），
+  要么把控制器上提到 frame 层。
+  **验收**：连续处理 N 个文件后，第二个文件的起步 worker 数等于第一个文件测到的最优；
+  以及"降了之后负载恢复，能自己加回去"。
+  **时机**：frame 编码器出现时（它才是"跨调用"存在的地方）。
 
 ### 工程与测试
 
