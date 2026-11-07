@@ -1,0 +1,5 @@
+# Normalize text to LF so a Windows clone builds and runs exactly like a Linux one
+# (shell scripts must keep LF; fixture payloads must not be touched at all).
+* text=auto eol=lf
+*.raw binary
+*.lz4 binary

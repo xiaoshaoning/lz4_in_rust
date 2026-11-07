@@ -1,0 +1,14 @@
+[package]
+name = "lz4_in_rust"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+description = "A zero-unsafe, byte-identical Rust port of LZ4 (block format, high compression, frame)"
+license = "BSD-2-Clause"
+readme = "README.md"
+repository = "https://github.com/xiaoshaoning/lz4_in_rust"
+keywords = ["lz4", "compression", "compress", "no-unsafe"]
+categories = ["compression"]
+exclude = ["/target", "/tools", "/.github"]
+
+[dependencies]

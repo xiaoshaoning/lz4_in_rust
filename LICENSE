@@ -1,0 +1,52 @@
+LZ4 in Rust
+A Rust port of the LZ4 reference implementation.
+
+Reference implementation (LZ4 Library, lib/)
+Copyright (c) 2011-2020, Yann Collet
+All rights reserved.
+
+Rust port
+Copyright (c) 2026, xiaoshaoning
+All rights reserved.
+
+-------------------------------------------------------------------------------
+Which license applies where
+-------------------------------------------------------------------------------
+
+This repository mirrors the dual-license model of upstream LZ4:
+
+- everything in this repository today (src/, tests/, examples/, tools/) is a port
+  of, or derived from, the upstream `lib/` directory, and is distributed under the
+  BSD 2-Clause license reproduced below;
+
+- if the command line tool (`programs/` upstream) is ported here in the future,
+  that part — being derived from GPL-2.0-or-later code — will carry the
+  GPL-2.0-or-later license instead, in its own directory with its own notice.
+
+The BSD 2-Clause license was chosen by upstream for `lib/` precisely because it is
+meant to be embedded in third-party applications; that is what this port is for.
+
+-------------------------------------------------------------------------------
+BSD 2-Clause License
+-------------------------------------------------------------------------------
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice, this
+  list of conditions and the following disclaimer in the documentation and/or
+  other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
