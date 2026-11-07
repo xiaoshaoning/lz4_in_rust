@@ -80,6 +80,21 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 
 同时把**有意缺省的三个 C 分支**写进模块文档：外字典（`dictCtx`/`usingExtDict`）、`fillOutput`（`destSize`）、`favorDecSpeed`（frame 层选项）——它们的缺失是决定，不是遗漏。
 
+第七轮评审（M3b 落地的 `lz4mid` + optimal parser + `chainSwap`）：
+
+| # | 问题 | 红标 | 处置 |
+|---|---|---|---|
+| F30 | **模块文档还停在 M3a 之前**：开头写"两种策略"，结尾写"Not here yet: level 2 和 10..=12"，中间还说 `sparsestChain` 是死代码——三句全与两小时后的代码矛盾 | 注释描述了不存在的结构（与 F8 同类，且这次是我自己刚写下的） | 文档重写成一张"等级 → 策略 → 判定依据"的表，列出四个**有意缺省**的 C 分支（外字典、`fillOutput`、`favorDecSpeed`、`suspend`），并说明为什么它们的缺失等于不可达 |
+| F31 | `short_inputs_are_all_literals` 只覆盖了 hash chain；`lz4mid` 与 optimal 各自的 `len < MIN_LENGTH` 早退分支**完全没测** | 新策略未覆盖（三条早退路径） | 三种策略各取一个等级（2 / 9 / 12）跑同样的 0、1、12 字节用例 |
+| F32 | C 里的 `assert(pos8 < ipIndex)` / `assert(pos4 < ipIndex)` 没有对应断言（`lz4mid` 的哈希表只应存过去的位置） | 缺失不变式 | 补 `debug_assert!`；顺带把小缓冲区与等级越界的测试从单一等级扩到三种策略 |
+
+第七轮**核实过、没问题**的：
+
+- `lz4mid` 的 `end_index - 2 < ilimit` 守卫与 C 一致，它同时保证 `ADDPOS8(ip-2)` 的 8 字节读在界内（`ip < len - 6`）。
+- optimal 的价格表尺寸 `OPT_NUM + TRAILING_LITERALS + 1` 覆盖 `add_match` 写的最后一个尾随单元；`add_match` 的调用点都用 `new.len + cur < OPT_NUM` 把关。
+- `sparsest_chain` 只在 `match_length == best.len`（即本次迭代真的找到匹配）时被调用，所以 `best.len ≥ MINMATCH`，`end = best.len - 3 ≥ 1`，循环必然有界。
+- 三种策略的输出都在 C fixture、差分 fuzz（等级 2/3/9/12）、CLI 端到端三处判等，且 fuzz 在 **debug 构建**下也通过（`debug_assert` 全程开启）。
+
 第三轮**只记录、不修**的小问题（工具/性能，不影响正确性）：
 
 - `tools/c_oracle.c` 的 `unframe` 在错误路径上没调 `LZ4F_freeDecompressionContext`（工具里的

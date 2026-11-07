@@ -1,33 +1,25 @@
-//! High-compression levels (`lib/lz4hc.c`): level 2 (`lz4mid`) and levels 3..=9 (hash chain).
+//! High-compression levels (`lib/lz4hc.c`): where `-2..-12` live.
 //!
-//! Two strategies live here because upstream keeps them in one file and they share the
-//! encoder: `lz4mid` (level 2) walks two flat hash tables — one over 4 bytes, one over 7 —
-//! and takes the first candidate it finds; the hash chain (3..=9) walks a delta chain and
-//! looks ahead before committing.
+//! Three strategies, one file, because upstream keeps them together and they share the
+//! encoder ([`encode_sequence`]) and the match counter:
 //!
-//! LZ4HC differs from the fast parser in one way that explains most of the code: instead of
-//! one candidate per hash slot it keeps a **chain** of previous positions, and searches that
-//! chain for the longest match (`nbSearches` attempts, 4 at level 3 up to 256 at level 9).
-//! It then looks ahead: a longer match starting a few bytes *before* the end of the current
-//! one can be worth more than the current one, so the driver compares m1/m2/m3 before
-//! committing (`_Search2` / `_Search3` in the C).
+//! | levels | strategy | what decides a match |
+//! |---|---|---|
+//! | 2 | `lz4mid` | two flat hash tables (4 and 7 bytes), first candidate wins, one look at `ip+1` |
+//! | 3..=9 | hash chain | a delta chain walked for `nbSearches` probes, then a two-step lookahead (`_Search2`/`_Search3`) |
+//! | 10..=12 | optimal parser | a quarter-byte price table over the next 4096 positions, then the cheapest path |
 //!
-//! The output must be **byte-identical** to the C library, so the parts that decide *which*
-//! match wins are ported literally, including:
-//! - the chain walk order and its clamp (`delta` capped at `MAX_DISTANCE`);
-//! - the level-9-only "pattern analysis" (`repeat` detection, `patternSegment`,
-//!   `sparsestChain` is dead here because the driver passes `chainSwap = 0`);
-//! - the truncation rules of the lookahead (`OPTIMAL_ML`, the `+3` and `< 3` conditions);
-//! - `encodeSequence`'s token/length layout.
+//! All three are **byte-identical** to the C library, so the parts that decide *which* match
+//! wins are ported literally: the chain walk order and its `MAX_DISTANCE` clamp, the
+//! level-9-only pattern analysis, the lookahead's truncation rules (`OPTIMAL_ML`, the `+3`
+//! and `< 3` conditions), the price model, and `encodeSequence`'s token/length layout.
 //!
-//! Three C branches are absent because the features they serve are not ported: external
-//! dictionaries (`dictCtx`/`usingExtDict`), the `fillOutput` directive (`destSize`), and
-//! `favorDecSpeed` (a frame-layer option). Their absence is deliberate, not an oversight:
-//! the driver passes the same "no dictionary, not limited" arguments the C does, and those
-//! branches are then unreachable.
-//!
-//! Not here yet: level 2 (`lz4mid`, a different strategy) and levels 10..=12 (the optimal
-//! parser). [`crate::level`] reports those as unsupported rather than compressing wrongly.
+//! Four C branches are absent because the features they serve are not ported: external
+//! dictionaries (`dictCtx`/`usingExtDict`), the `fillOutput` directive (`destSize`),
+//! `favorDecSpeed` (a frame-layer option the reference tool leaves off), and the
+//! interrupted-compression bookkeeping (`suspend`). Their absence is deliberate: the
+//! drivers pass the same "no dictionary, not limited" arguments the C does, which makes
+//! those branches unreachable.
 
 use crate::block::{self, count_match, Out};
 use crate::Error;
@@ -315,6 +307,7 @@ fn compress_mid(src: &[u8], out: &mut Out) -> Result<usize, Error> {
         // the long (7-byte) hash first: it finds the good matches, the 4-byte one the rest
         let h8 = mid_hash8(src, ip) as usize;
         let pos8 = hash8[h8];
+        debug_assert!(pos8 < ip_index, "the tables only hold past positions");
         hash8[h8] = ip_index;
         let mut match_len = mid_count_match(src, ip, ip_index, pos8, matchlimit);
         let mut match_dist = ip_index - pos8;
@@ -322,6 +315,7 @@ fn compress_mid(src: &[u8], out: &mut Out) -> Result<usize, Error> {
         if match_len < MIN_MATCH {
             let h4 = mid_hash4(read4(src, ip)) as usize;
             let pos4 = hash4[h4];
+            debug_assert!(pos4 < ip_index);
             hash4[h4] = ip_index;
             match_len = mid_count_match(src, ip, ip_index, pos4, matchlimit);
             match_dist = ip_index - pos4;
@@ -1134,10 +1128,20 @@ mod tests {
     #[test]
     fn small_output_buffer_is_an_error() {
         let raw = vec![b'z'; 1000];
-        let mut packed = vec![0u8; block::compress_bound(raw.len()) - 1];
-        assert!(matches!(
-            compress_into(&raw, &mut packed, 9),
-            Err(Error::OutputTooSmall { .. })
-        ));
+        for level in [2u8, 3, 12] {
+            let mut packed = vec![0u8; block::compress_bound(raw.len()) - 1];
+            assert!(matches!(
+                compress_into(&raw, &mut packed, level),
+                Err(Error::OutputTooSmall { .. })
+            ));
+        }
+        // and levels outside 2..=12 are refused rather than clamped
+        let mut packed = vec![0u8; block::compress_bound(raw.len())];
+        for level in [1u8, 13] {
+            assert!(matches!(
+                compress_into(&raw, &mut packed, level),
+                Err(Error::Unsupported(_))
+            ));
+        }
     }
 }
