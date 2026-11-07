@@ -31,9 +31,8 @@ prints the full list. A file holding several concatenated frames is decoded in f
   `Read`/`Write` adapter (M4c).
 - No `-m`/`--multiple` (directories), no `--list`, no `-b` (benchmark), no legacy `-l`
   format, no dictionaries.
-- `-2` and `-10..-12` are accepted but those parsers are not ported yet (`lz4mid` and the
-  optimal parser), so they report the gap instead of silently compressing at another level.
-  `-3..-9` work and are byte-identical to the reference.
+- Every level `-1..-12` works and is byte-identical to the reference tool, including its
+  block-size shrink for small inputs.
 
 ## Tests
 

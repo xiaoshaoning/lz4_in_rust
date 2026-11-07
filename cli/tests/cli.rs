@@ -267,7 +267,7 @@ fn the_reference_tool_accepts_ours_and_we_accept_theirs() {
     case.write("in.txt", &data);
 
     // ours -> theirs, and byte-identical when the level and block size agree
-    for level in ["-1", "-3", "-9"] {
+    for level in ["-1", "-2", "-3", "-9", "-12"] {
         assert!(case.run(&["-f", level, "in.txt", "ours.lz4"]).ok);
         let out = Command::new(lz4)
             .args([level, "-T1", "-f", "in.txt", "theirs.lz4"])

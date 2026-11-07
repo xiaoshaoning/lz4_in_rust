@@ -32,7 +32,7 @@ does not actually link blocks — see `docs/REVIEW.md`.
 | `level` | `-1..-12` → parser, in one place | `lib/lz4frame.c` | ✅ level 1; 2–12 report the gap |
 | `par` | parallel block engine + adaptive worker policy; `compress_each` streams blocks in order | — (new) | ✅ output independent of thread count |
 | `frame` | LZ4 frame format: descriptor, blocks, both checksums, linked + independent, skippable frames | `lib/lz4frame.c` | ✅ our frames are byte-identical to C's and `lz4 -d` reads them |
-| `hc` | high compression: hash chain, levels 3–9 | `lib/lz4hc.c` | ✅ byte-identical to C; level 2 (`lz4mid`) and 10–12 (optimal parser) next |
+| `hc` | high compression: `lz4mid` (2), hash chain (3–9), optimal parser (10–12) | `lib/lz4hc.c` | ✅ byte-identical to C at every level |
 | `cli/` (`lz4r`) | command line tool: files, pipes, `-1..-12`, `-B#`, `-T#` | `programs/` | ✅ **GPL-2.0-or-later** (separate crate) |
 
 ## Command line
@@ -65,7 +65,7 @@ It is a **separate crate under GPL-2.0-or-later**, because it is a port of upstr
 ## Build and check
 
 ```sh
-cargo test --workspace                       # 69 tests, no C toolchain needed (fixtures are committed)
+cargo test --workspace                       # 75 tests, no C toolchain needed (fixtures are committed)
 cargo test --release                         # same, and much faster on the big roundtrips
 cargo clippy --all-targets && cargo fmt --check
 ```

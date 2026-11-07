@@ -184,7 +184,12 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
   **踩到的坑**（都写进了提交信息）：C 的 `encodeSequence` 通过指针把 `ip`/`anchor` 一起推进，
   第一版只推进了 `ip`，于是"跳过 1–2 字节"的路径把字面量吞掉，输出环环错位、
   最终 `anchor > ip` panic；把签名改成 `&mut ip, &mut anchor` 后与 C 同构。
-- [ ] **M3b `hc` 2（`lz4mid`）与 10..=12（optimal parser + 价格表）**
+- [x] **M3b `hc` 2 与 10..=12**：`lz4mid`（两张平面哈希表：4 字节与 7 字节，各 2^14 桶）+
+  optimal parser（价格表 `OPT_NUM=4096`、`PRICE_SCALE=4`、`TRAILING_LITERALS`、反向回溯路径）
+  + `chainSwap` 的 `sparsestChain`（M3a 里因为驱动传 `chainSwap=0` 而没有实现，optimal 需要它）。
+  `favorDecSpeed` 未实现（参考 CLI 默认为关，且它是 frame 层偏好），模块文档写明这是缺失而非猜测。
+  验收：`text-l12.lz4` fixture 逐字节相同；差分 fuzz 覆盖等级 {2,3,9,12}；CLI 端到端
+  `lz4r -2/-10/-11/-12` 与 `lz4` 逐字节相同。**0.1.0 的三个判据（frame / HC / CLI）全部达成。**
 - [ ] **M4b `frame`**：header/FLG/BD/HC(XXH32)、block header、block/content checksum、
   linked/independent、64 KiB–4 MiB 块、skippable frame；编码器直接消费 `par::compress_each`。
 - [x] **M5 CLI**（`cli/`，独立 crate，**GPL-2.0-or-later** + 自己的 `COPYING`）：

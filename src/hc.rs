@@ -1,4 +1,9 @@
-//! High-compression levels (`lib/lz4hc.c`): levels 3..=9, the hash-chain strategy.
+//! High-compression levels (`lib/lz4hc.c`): level 2 (`lz4mid`) and levels 3..=9 (hash chain).
+//!
+//! Two strategies live here because upstream keeps them in one file and they share the
+//! encoder: `lz4mid` (level 2) walks two flat hash tables — one over 4 bytes, one over 7 —
+//! and takes the first candidate it finds; the hash chain (3..=9) walks a delta chain and
+//! looks ahead before committing.
 //!
 //! LZ4HC differs from the fast parser in one way that explains most of the code: instead of
 //! one candidate per hash slot it keeps a **chain** of previous positions, and searches that
@@ -43,9 +48,14 @@ const MIN_LENGTH: usize = block::MFLIMIT + 1;
 const ML_MASK: usize = 15;
 const ML_BITS: u32 = 4;
 const RUN_MASK: usize = 15;
-/// Levels 3..=9: the hash-chain strategy. Level 2 is `lz4mid`, 10..=12 the optimal parser.
-pub const LEVEL_MIN: u8 = 3;
-pub const LEVEL_MAX: u8 = 9;
+/// The levels this module handles: `lz4mid` (2), hash chain (3..=9), optimal parser (10..=12).
+pub const LEVEL_MIN: u8 = 2;
+pub const LEVEL_MAX: u8 = 12;
+/// `lz4mid`: one hash table over 4 bytes and one over 7, `2^14` buckets each.
+const MID_HASHLOG: u32 = HASH_LOG - 1;
+const MID_TABLE: usize = 1 << MID_HASHLOG;
+/// How many bytes `LZ4MID` hashes (a 7-byte motif hides behind an 8-byte read).
+const MID_HASH_BYTES: usize = 8;
 /// Probes per position, for levels 3..=9 (`k_clTable`; its first four entries are the
 /// `lz4mid` levels this module does not handle, so the table starts at level 3).
 const NB_SEARCHES: [u32; 7] = [4, 8, 16, 32, 64, 128, 256];
@@ -215,6 +225,31 @@ fn protect_dict_end(prefix_idx: u32, match_index: u32) -> bool {
     (prefix_idx.wrapping_sub(1)).wrapping_sub(match_index) >= 3
 }
 
+/// `LZ4HC_sparsestChain`: a longer match also matches at every position inside the current
+/// one; among those, find the chain link that jumps farthest back. Returns the distance to
+/// it and where inside the match it sits (the optimal parser uses it to skip candidates
+/// that cannot be longer).
+fn sparsest_chain(chain: &Chain, match_index: u32, longest: isize) -> (u32, u32) {
+    const TRIGGER: i32 = 4;
+    let end = longest - MIN_MATCH as isize + 1;
+    let mut distance = 1u32;
+    let mut chain_pos = 0u32;
+    let mut accel = 1i32 << TRIGGER;
+    let mut pos = 0i32;
+    while (pos as isize) < end {
+        let candidate = chain.delta(match_index + pos as u32);
+        let step = accel >> TRIGGER;
+        accel += 1;
+        if candidate > distance {
+            distance = candidate;
+            chain_pos = pos as u32;
+            accel = 1 << TRIGGER;
+        }
+        pos += step;
+    }
+    (distance, chain_pos)
+}
+
 /// `LZ4HC_patternSegment`, prefix-only (no external dictionary): the run of `pattern` around
 /// `candidate`, measured forward and backward, never below `lowest`.
 fn pattern_segment(
@@ -234,6 +269,382 @@ fn pattern_segment(
     Some((forward, back))
 }
 
+// ---------------------------------------------------------------- level 2: lz4mid
+
+#[inline]
+fn mid_hash4(v: u32) -> u32 {
+    v.wrapping_mul(2_654_435_761) >> (32 - MID_HASHLOG)
+}
+
+/// `LZ4MID_hash8Ptr`: seven bytes (`v << 8`) times a 56-bit prime, into `2^14` buckets.
+#[inline]
+fn mid_hash8(src: &[u8], at: usize) -> u32 {
+    const PRIME: u64 = 58_295_818_150_454_627;
+    ((read8(src, at) << 8).wrapping_mul(PRIME) >> (64 - MID_HASHLOG)) as u32
+}
+
+/// `LZ4MID_countMatch` for a candidate inside the prefix: 0 when out of reach, else the
+/// length of the match between `ip` and the position `pos` encoded in the tables.
+fn mid_count_match(src: &[u8], ip: usize, ip_index: u32, pos: u32, matchlimit: usize) -> usize {
+    if ip_index - pos > MAX_DISTANCE as u32 {
+        return 0;
+    }
+    count_match(src, ip, (pos - PREFIX_IDX) as usize, matchlimit)
+}
+
+/// `LZ4MID_compress`: two hash lookups per position, no lookahead, skip faster over
+/// incompressible runs.
+fn compress_mid(src: &[u8], out: &mut Out) -> Result<usize, Error> {
+    let len = src.len();
+    if len < MIN_LENGTH {
+        encode_last_literals(out, src, 0);
+        return Ok(out.at);
+    }
+    let mut hash4 = vec![0u32; MID_TABLE];
+    let mut hash8 = vec![0u32; MID_TABLE];
+
+    let mflimit = len - block::MFLIMIT;
+    let matchlimit = len - block::LAST_LITERALS;
+    let ilimit = len - MID_HASH_BYTES;
+    let mut ip = 0usize;
+    let mut anchor = 0usize;
+
+    while ip <= mflimit {
+        let ip_index = ip as u32 + PREFIX_IDX;
+
+        // the long (7-byte) hash first: it finds the good matches, the 4-byte one the rest
+        let h8 = mid_hash8(src, ip) as usize;
+        let pos8 = hash8[h8];
+        hash8[h8] = ip_index;
+        let mut match_len = mid_count_match(src, ip, ip_index, pos8, matchlimit);
+        let mut match_dist = ip_index - pos8;
+
+        if match_len < MIN_MATCH {
+            let h4 = mid_hash4(read4(src, ip)) as usize;
+            let pos4 = hash4[h4];
+            hash4[h4] = ip_index;
+            match_len = mid_count_match(src, ip, ip_index, pos4, matchlimit);
+            match_dist = ip_index - pos4;
+        }
+
+        if match_len >= MIN_MATCH {
+            if match_len < 8 && ip < mflimit {
+                // a short match: the next position may start a longer one
+                let h8b = mid_hash8(src, ip + 1) as usize;
+                let pos8b = hash8[h8b];
+                let longer = mid_count_match(src, ip + 1, ip_index + 1, pos8b, matchlimit);
+                if longer > match_len && pos8b != ip_index {
+                    hash8[h8b] = ip_index + 1;
+                    ip += 1;
+                    match_len = longer;
+                    match_dist = ip_index + 1 - pos8b;
+                }
+            }
+
+            // pull the match back over bytes already counted as literals
+            while ip > anchor
+                && (ip as u32) > match_dist
+                && src[ip - 1] == src[ip - match_dist as usize - 1]
+            {
+                ip -= 1;
+                match_len += 1;
+            }
+
+            // the start of the match is worth hashing (the tables skipped it)
+            let start_index = ip as u32 + PREFIX_IDX;
+            let at8 = mid_hash8(src, ip + 1) as usize;
+            hash8[at8] = start_index + 1;
+            let at8 = mid_hash8(src, ip + 2) as usize;
+            hash8[at8] = start_index + 2;
+            let at4 = mid_hash4(read4(src, ip + 1)) as usize;
+            hash4[at4] = start_index + 1;
+
+            encode_sequence(
+                out,
+                src,
+                &mut ip,
+                &mut anchor,
+                Match {
+                    len: match_len as isize,
+                    off: match_dist as isize,
+                    back: 0,
+                },
+            );
+
+            // and the end of it
+            let end_index = ip as u32 + PREFIX_IDX;
+            if end_index - 2 < ilimit as u32 + PREFIX_IDX {
+                if ip > 5 {
+                    let at = mid_hash8(src, ip - 5) as usize;
+                    hash8[at] = end_index - 5;
+                }
+                let at = mid_hash8(src, ip - 3) as usize;
+                hash8[at] = end_index - 3;
+                let at = mid_hash8(src, ip - 2) as usize;
+                hash8[at] = end_index - 2;
+                let at = mid_hash4(read4(src, ip - 2)) as usize;
+                hash4[at] = end_index - 2;
+                let at = mid_hash4(read4(src, ip - 1)) as usize;
+                hash4[at] = end_index - 1;
+            }
+            continue;
+        }
+
+        // no match: skip ahead, faster the longer the literal run gets
+        ip += 1 + ((ip - anchor) >> 9);
+    }
+
+    encode_last_literals(out, src, anchor);
+    Ok(out.at)
+}
+
+// ---------------------------------------------------------------- levels 10..=12: optimal
+
+/// Parser window (`LZ4_OPT_NUM`): the price table covers this many positions ahead.
+const OPT_NUM: usize = 1 << 12;
+/// Positions right after a match also get priced as literals (`TRAILING_LITERALS`).
+const TRAILING_LITERALS: usize = 3;
+/// Prices are in 1/4 byte, so a sequence and a literal run compare exactly.
+const PRICE_SCALE: i32 = 4;
+
+/// (probes, sufficient match length) for levels 10, 11, 12 (`k_clTable`).
+const OPT_PARAMS: [(u32, usize); 3] = [(96, 64), (512, 128), (16384, OPT_NUM)];
+
+/// One cell of the price table: `mlen == 1` means "this step is a literal".
+#[derive(Clone, Copy, Default)]
+struct Cell {
+    price: i32,
+    off: i32,
+    mlen: i32,
+    litlen: i32,
+}
+
+fn literals_price(litlen: i32) -> i32 {
+    debug_assert!(litlen >= 0);
+    let mut price = litlen;
+    if litlen >= RUN_MASK as i32 {
+        price += 1 + (litlen - RUN_MASK as i32) / 255;
+    }
+    price * PRICE_SCALE
+}
+
+fn sequence_price(litlen: i32, mlen: i32) -> i32 {
+    debug_assert!(mlen >= MIN_MATCH as i32);
+    let mut price = 1 + 2; // token + 16-bit offset
+    if mlen >= (ML_MASK + MIN_MATCH) as i32 {
+        price += 1 + (mlen - (ML_MASK + MIN_MATCH) as i32) / 255;
+    }
+    price * PRICE_SCALE + literals_price(litlen)
+}
+
+/// Long literal runs only matter through their position inside the 255-byte steps, and the
+/// scaled price of a megabyte-long run would overflow an i32.
+fn priced_litlen(llen: i32) -> i32 {
+    let reduce_from = RUN_MASK as i32 + 255;
+    if llen < reduce_from {
+        return llen;
+    }
+    reduce_from + (llen - RUN_MASK as i32) % 255
+}
+
+fn run_start_price(opt: &[Cell], pos: usize) -> i32 {
+    let ll = opt[pos].litlen as usize;
+    if ll <= pos {
+        opt[pos - ll].price
+    } else {
+        0
+    }
+}
+
+/// `LZ4HC_addMatch`: price every match length reachable from `cur`, then fill the trailing
+/// positions with literals. Returns the furthest position priced so far.
+fn add_match(opt: &mut [Cell], cur: usize, m: Match, last_pos: usize) -> usize {
+    let ll = opt[cur].litlen;
+    let base_price = run_start_price(opt, cur);
+    let mut last_pos = last_pos;
+    let mut ml = MIN_MATCH as i32;
+    while ml <= m.len as i32 {
+        let pos = cur + ml as usize;
+        let price = base_price + sequence_price(ll, ml);
+        if pos as i32 > last_pos as i32 + TRAILING_LITERALS as i32 || price <= opt[pos].price {
+            opt[pos] = Cell {
+                price,
+                off: m.off as i32,
+                mlen: ml,
+                litlen: 0,
+            };
+            if ml == m.len as i32 && last_pos < pos {
+                last_pos = pos;
+            }
+        }
+        ml += 1;
+    }
+    for add_lit in 1..=TRAILING_LITERALS {
+        let pos = last_pos + add_lit;
+        opt[pos] = Cell {
+            price: opt[last_pos].price + literals_price(add_lit as i32),
+            off: 0,
+            mlen: 1,
+            litlen: add_lit as i32,
+        };
+    }
+    last_pos
+}
+
+/// `LZ4HC_FindLongestMatch`: the optimal parser searches with a chain swap and always with
+/// pattern analysis, whatever the level.
+fn find_longest(
+    chain: &mut Chain,
+    src: &[u8],
+    ip: usize,
+    i_high_limit: usize,
+    attempts: u32,
+) -> Match {
+    let m = wider_match(
+        chain,
+        src,
+        ip,
+        ip,
+        i_high_limit,
+        MIN_MATCH as isize - 1,
+        attempts,
+        true,
+        true,
+    );
+    if m.len < MIN_MATCH as isize {
+        NO_MATCH
+    } else {
+        m
+    }
+}
+
+/// `LZ4HC_compress_optimal`: dynamic programming over a window of `OPT_NUM` positions, then
+/// a backward walk to recover the cheapest path of literals and matches.
+///
+/// `favorDecSpeed` is not implemented (the reference tool leaves it off, and it is a
+/// frame-level preference): the branches and prices it would add are absent, not guessed.
+fn compress_optimal(src: &[u8], out: &mut Out, level: u8) -> Result<usize, Error> {
+    let (attempts, target_length) = OPT_PARAMS[(level - 10) as usize];
+    let sufficient_len = target_length.min(OPT_NUM - 1) as isize;
+    let len = src.len();
+    if len < MIN_LENGTH {
+        encode_last_literals(out, src, 0);
+        return Ok(out.at);
+    }
+
+    let mut chain = Chain::new();
+    let mut opt = vec![Cell::default(); OPT_NUM + TRAILING_LITERALS + 1];
+    let mflimit = len - block::MFLIMIT;
+    let matchlimit = len - block::LAST_LITERALS;
+    let mut ip = 0usize;
+    let mut anchor = 0usize;
+
+    while ip <= mflimit {
+        let llen = priced_litlen((ip - anchor) as i32);
+        let first = find_longest(&mut chain, src, ip, matchlimit, attempts);
+        if first.len == 0 {
+            ip += 1;
+            continue;
+        }
+
+        let (last_seq_pos, last_seq) = if first.len > sufficient_len {
+            // already good enough: no point pricing anything
+            (0usize, first)
+        } else {
+            // the first MINMATCH positions can only be literals
+            for (r, cell) in opt.iter_mut().take(MIN_MATCH).enumerate() {
+                *cell = Cell {
+                    price: literals_price(llen + r as i32),
+                    off: 0,
+                    mlen: 1,
+                    litlen: llen + r as i32,
+                };
+            }
+            let mut last_pos = add_match(&mut opt, 0, first, 0);
+
+            let mut cur = 1usize;
+            let mut immediate: Option<(usize, Match)> = None;
+            while cur < last_pos {
+                if ip + cur > mflimit {
+                    break;
+                }
+                // the next position is no cheaper: searching here cannot improve the path
+                if opt[cur + 1].price <= opt[cur].price {
+                    cur += 1;
+                    continue;
+                }
+                let new = find_longest(&mut chain, src, ip + cur, matchlimit, attempts);
+                if new.len == 0 {
+                    cur += 1;
+                    continue;
+                }
+                if new.len > sufficient_len || new.len + cur as isize >= OPT_NUM as isize {
+                    immediate = Some((cur, new));
+                    break;
+                }
+                last_pos = add_match(&mut opt, cur, new, last_pos);
+                cur += 1;
+            }
+
+            match immediate {
+                Some((pos, m)) => (pos, m),
+                None => {
+                    let m = Match {
+                        len: opt[last_pos].mlen as isize,
+                        off: opt[last_pos].off as isize,
+                        back: 0,
+                    };
+                    (last_pos - m.len as usize, m)
+                }
+            }
+        };
+
+        // `opt[pos]` describes the step *ending* at pos: walk back, moving each step to its
+        // starting position, so the path can then be encoded front to back
+        let mut pos = last_seq_pos as isize;
+        let mut mlen = last_seq.len as i32;
+        let mut off = last_seq.off as i32;
+        while pos > 0 {
+            let prev_mlen = opt[pos as usize].mlen;
+            let prev_off = opt[pos as usize].off;
+            opt[pos as usize].mlen = mlen;
+            opt[pos as usize].off = off;
+            mlen = prev_mlen;
+            off = prev_off;
+            debug_assert!(mlen > 0 && mlen as isize <= pos);
+            pos -= mlen as isize;
+        }
+        opt[0].mlen = mlen;
+        opt[0].off = off;
+
+        let mut r_pos = 0usize;
+        while r_pos <= last_seq_pos {
+            let ml = opt[r_pos].mlen;
+            let offset = opt[r_pos].off;
+            if ml == 1 {
+                ip += 1;
+                r_pos += 1;
+                continue;
+            }
+            r_pos += ml as usize;
+            encode_sequence(
+                out,
+                src,
+                &mut ip,
+                &mut anchor,
+                Match {
+                    len: ml as isize,
+                    off: offset as isize,
+                    back: 0,
+                },
+            );
+        }
+    }
+
+    encode_last_literals(out, src, anchor);
+    Ok(out.at)
+}
+
 // ---------------------------------------------------------------- the search
 
 /// `LZ4HC_InsertAndGetWiderMatch`, prefix-only: walk the chain from `ip`, keep the longest
@@ -251,6 +662,7 @@ fn wider_match(
     longest: isize,
     max_attempts: u32,
     pattern_analysis: bool,
+    chain_swap: bool,
 ) -> Match {
     let ip_index = ip as u32 + PREFIX_IDX;
     let within_start = PREFIX_IDX + MAX_DISTANCE as u32 + 1 > ip_index;
@@ -273,6 +685,7 @@ fn wider_match(
     let mut match_index = chain.hash[hash(pattern) as usize];
 
     // repeated-motif detection is only paid for when a candidate needs it
+    let mut match_chain_pos = 0u32;
     let mut repeat_tested = false;
     let mut repeat_confirmed = false;
     let mut src_pattern_length = 0usize;
@@ -299,6 +712,7 @@ fn wider_match(
         } else {
             true
         };
+        let mut match_length = 0isize;
         if pre && read4(src, match_at) == pattern {
             let back = if look_back > 0 {
                 count_back(src, ip, match_at, i_low_limit, 0)
@@ -307,7 +721,7 @@ fn wider_match(
             };
             let found =
                 MIN_MATCH + count_match(src, ip + MIN_MATCH, match_at + MIN_MATCH, i_high_limit);
-            let match_length = found as isize - back;
+            match_length = found as isize - back;
             if match_length > best.len {
                 best.len = match_length;
                 best.off = (ip_index - match_index) as isize;
@@ -315,10 +729,26 @@ fn wider_match(
             }
         }
 
+        // A longer match must also match at each position inside the current one: if this
+        // iteration found one, jump straight to the chain that reaches furthest back
+        // (only the optimal parser asks for this: chainSwap).
+        if chain_swap && match_length == best.len && match_index + best.len as u32 <= ip_index {
+            let (distance, pos) = sparsest_chain(chain, match_index, best.len);
+            debug_assert_eq!(look_back, 0, "chainSwap searches forward only");
+            if distance > 1 {
+                if distance > match_index {
+                    break;
+                }
+                match_index -= distance;
+                match_chain_pos = pos;
+                continue;
+            }
+        }
+
         // pattern analysis (level 9 only): a run of a repeated motif lets the search jump
         // straight to the best position inside that run instead of walking every link
         let next_delta = chain.delta(match_index);
-        if pattern_analysis && next_delta == 1 {
+        if pattern_analysis && next_delta == 1 && match_chain_pos == 0 {
             let candidate = match_index - 1;
             if !repeat_tested {
                 repeat_tested = true;
@@ -374,7 +804,7 @@ fn wider_match(
             }
         }
 
-        let step = chain.delta(match_index);
+        let step = chain.delta(match_index + match_chain_pos);
         if step > match_index {
             break;
         }
@@ -402,6 +832,7 @@ fn find_best_match(
         MIN_MATCH as isize - 1,
         attempts,
         pattern_analysis,
+        false,
     )
 }
 
@@ -453,13 +884,19 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
     }
     if !(LEVEL_MIN..=LEVEL_MAX).contains(&level) {
         return Err(Error::Unsupported(
-            "hc::compress_into handles levels 3..=9; the caller must route the others",
+            "hc::compress_into handles levels 2..=9; the caller must route the others",
         ));
     }
-    let attempts = NB_SEARCHES[(level - LEVEL_MIN) as usize];
+    let mut out = Out { buf: dst, at: 0 };
+    if level == 2 {
+        return compress_mid(src, &mut out);
+    }
+    if level >= 10 {
+        return compress_optimal(src, &mut out, level);
+    }
+    let attempts = NB_SEARCHES[(level - LEVEL_MIN - 1) as usize];
     let pattern_analysis = attempts > PATTERN_ANALYSIS_FROM;
 
-    let mut out = Out { buf: dst, at: 0 };
     let len = src.len();
     if len < MIN_LENGTH {
         encode_last_literals(&mut out, src, 0);
@@ -500,6 +937,7 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
                     m1.len,
                     attempts,
                     pattern_analysis,
+                    false,
                 );
                 (at as isize + m2.back, m2)
             } else {
@@ -555,6 +993,7 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
                         m2.len,
                         attempts,
                         pattern_analysis,
+                        false,
                     );
                     (at as isize + m3.back, m3)
                 } else {
@@ -633,6 +1072,7 @@ mod tests {
         for (raw_name, frame_name, level) in [
             ("text.raw", "text-l9.lz4", 9u8),
             ("numbers.raw", "numbers-l9.lz4", 9),
+            ("text.raw", "text-l12.lz4", 12),
         ] {
             let raw = fixture(raw_name);
             let c_block = fixture(frame_name);
@@ -649,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn every_ported_level_roundtrips() {
+    fn every_level_roundtrips() {
         let mut x = 0x2545_F491u32;
         let raw: Vec<u8> = (0..200_000)
             .map(|i| {

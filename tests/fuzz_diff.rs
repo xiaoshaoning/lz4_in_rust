@@ -305,8 +305,8 @@ fn run_case(fx: &Fixture, kind: Kind, len: usize, seed: u64) {
     fx.c_decodes_our_block(&src, 7, &what);
     fx.we_decode_c_block(&src, "0", &what);
     fx.we_decode_c_block(&src, "9", &what);
-    // high compression: level 3 (fewest probes), 6 (middle), 9 (pattern analysis)
-    for level in [3u8, 6, 9] {
+    // high compression: 2 (lz4mid), 3 (fewest probes), 9 (pattern analysis), 12 (optimal)
+    for level in [2u8, 3, 9, 12] {
         fx.hc_bytes_match_c(&src, level, &what);
     }
 

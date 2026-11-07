@@ -120,8 +120,7 @@ offset 16..32 用 2×16 字节、8..16 用 4×8 字节（每次读的源都已�
 | `level` | ✅ `-1..-12` → 解析器的唯一映射（`src/level.rs`，4 个单测） |
 | `par`（并行块引擎 + 自适应线程数） | ✅ `plan`/`Control` 纯函数 + 池 + 按序流式交付；15 个单测 |
 | `frame`（整帧、无字典、无 Read/Write 适配层） | ✅ `src/frame.rs`；13 个单测 + 5 个与 C 的差分测试 |
-| `hc`（3..=9，hash chain） | ✅ `src/hc.rs`；与 C 逐字节相同（fixture + fuzz 双证） |
-| `hc`（2 = lz4mid、10..=12 = optimal） | ⬜ M3b |
+| `hc`（2 = lz4mid、3..=9 = hash chain、10..=12 = optimal） | ✅ `src/hc.rs`；每个等级都与 C 逐字节相同（fixture + fuzz 双证） |
 | `frame` | ⬜ M4 |
 | CLI | ⬜ M5 |
 
@@ -163,7 +162,7 @@ offset 16..32 用 2×16 字节、8..16 用 4×8 字节（每次读的源都已�
 | M1 ✅ | `block::decompress_into` | 解 C 全部语料；损坏输入不 panic |
 | M2 ✅ | `block::compress_into` + `compress_bound` | 与 C **逐字节相同**；C 能解我们的输出 |
 | M3a ✅ | `hc` 3..=9（hash chain + 两段前瞻 + level 9 的 pattern analysis） | `-3..-9` 与 C 逐字节相同（committed fixture + 差分 fuzz） |
-| M3b | `hc` 2（`lz4mid`）与 10..=12（optimal parser + 价格表） | `-2`/`-10..-12` 与 C 逐字节相同 |
+| M3b ✅ | `hc` 2（`lz4mid`）与 10..=12（optimal parser + 价格表 + chainSwap） | `-2`/`-10..-12` 与 C 逐字节相同（fixture、差分 fuzz、CLI 端到端三处判等） |
 | M4a ✅ | `par`：并行块引擎 + 策略（`plan` / `Control` / 池） | 输出与线程数无关；小主机/小块/小输入自动单线程；见 §9 |
 | M4b ✅ | `frame`：descriptor/blocks/两个 checksum/linked+independent/skippable，复用 `par::compress_each` | 我们的帧与 C **逐字节相同**；C 能解我们的帧；linked 多块帧能解（含跨块引用） |
 | M4c | `frame` 收尾：`Read`/`Write` 适配层、字典（`createCDict` 语义）、多帧遍历辅助、已知 content size 时的并行解压 | 能用流处理管道/文件，内存与块大小无关 |

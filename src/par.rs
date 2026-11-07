@@ -779,16 +779,9 @@ mod tests {
         });
         assert_eq!(got, Err(Sink::Stop(2)));
 
-        // and a codec error (a level that is not ported yet) converts into the caller's type
-        // level 2 (lz4mid) is still unported, so it stands in for "the gap reports itself"
-        let hi = Opts {
-            level: Level::new(2).unwrap(),
-            ..opts(Workers::Fixed(2), 4096)
-        };
-        assert!(matches!(
-            compress_each_with(&src, &hi, 8, |_, _| Ok(())),
-            Err(Sink::Codec(Error::Unsupported(_)))
-        ));
+        // codec errors reach the caller through the same type (all twelve levels are
+        // ported now, so the conversion is checked directly instead of via a driver error)
+        assert_eq!(Sink::from(Error::Truncated), Sink::Codec(Error::Truncated));
     }
 
     /// End to end: the level is honoured by the pool, and levels above 1 report the gap
@@ -806,15 +799,16 @@ mod tests {
         }
         assert_eq!(ours, expected, "level 1 must be the C default parser");
 
-        // level 2 (lz4mid) is still unported, so it stands in for "the gap reports itself"
-        let hi = Opts {
-            level: Level::new(2).unwrap(),
-            ..opts(Workers::Fixed(2), 4096)
-        };
-        assert!(matches!(
-            compress_with(&src, &hi, 4),
-            Err(Error::Unsupported(_))
-        ));
+        // all twelve levels are ported: the pool must now accept every one of them
+        for n in 1..=12u8 {
+            let o = Opts {
+                level: Level::new(n).unwrap(),
+                ..opts(Workers::Fixed(2), 4096)
+            };
+            let blocks = compress_with(&src, &o, 4).unwrap();
+            let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
+            assert_eq!(decode(&refs, src.len(), &o, 4).unwrap(), src, "level {n}");
+        }
     }
 
     #[test]

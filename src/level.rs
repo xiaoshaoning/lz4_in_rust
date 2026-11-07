@@ -5,9 +5,8 @@
 //! (`lib/lz4hc.c`). The split point is `LZ4HC_CLEVEL_MIN = 2`, and `lib/lz4frame.c` picks
 //! the parser with exactly that comparison.
 //!
-//! Ported so far: level 1, and levels 3..=9 (the hash-chain strategy). Level 2 (`lz4mid`)
-//! and 10..=12 (the optimal parser) report themselves as unsupported rather than
-//! compressing at another level and calling it close enough.
+//! All twelve levels are ported: 1 is the fast parser, 2 is `lz4mid`, 3..=9 the hash chain,
+//! and 10..=12 the optimal parser.
 //!
 //! This mapping lives here on purpose. `par`, the frame layer and the CLI must not each
 //! learn "1 is fast, 2+ is HC": that is one design decision, so it gets one home. They
@@ -64,12 +63,8 @@ impl Default for Level {
 pub fn compress_into(src: &[u8], dst: &mut [u8], level: Level) -> Result<usize, Error> {
     if level.is_fast() {
         block::compress_into(src, dst, level.acceleration())
-    } else if (crate::hc::LEVEL_MIN..=crate::hc::LEVEL_MAX).contains(&level.as_u8()) {
-        crate::hc::compress_into(src, dst, level.as_u8())
     } else {
-        Err(Error::Unsupported(
-            "high compression level 2 (lz4mid) and 10..=12 (optimal parser) are not ported yet",
-        ))
+        crate::hc::compress_into(src, dst, level.as_u8())
     }
 }
 
@@ -115,30 +110,44 @@ mod tests {
         assert_eq!(&ours[..n], &c_block[..], "lz4 -1 must equal the C default");
     }
 
-    /// The levels that are ported must roundtrip; the two that are not must say so rather
-    /// than silently compressing at another level.
+    /// Every level must roundtrip. Levels are not monotonic in size in the reference either
+    /// (level 10 probes less than 9 but parses better), so this only checks the endpoints.
     #[test]
-    fn high_levels_are_either_ported_or_reported() {
-        let raw = vec![b'x'; 1000];
+    fn all_levels_roundtrip_and_improve() {
+        let mut x = 0x2545_F491u32;
+        let raw: Vec<u8> = (0..40_000)
+            .map(|i| {
+                if i % 5 == 0 {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    x as u8
+                } else {
+                    b"the quick brown fox "[i % 20]
+                }
+            })
+            .collect();
         let mut out = vec![0u8; block::compress_bound(raw.len())];
-        for n in 3..=9u8 {
+        let mut first_size = 0usize;
+        for n in 1..=12u8 {
             let size = compress_into(&raw, &mut out, Level::new(n).unwrap())
                 .unwrap_or_else(|e| panic!("level {n}: {e}"));
             let mut back = vec![0u8; raw.len()];
             assert_eq!(
                 block::decompress_into(&out[..size], &mut back).unwrap(),
-                raw.len()
+                raw.len(),
+                "level {n} roundtrip"
             );
-            assert_eq!(back, raw);
-        }
-        for n in [2u8, 10, 11, 12] {
-            assert!(
-                matches!(
-                    compress_into(&raw, &mut out, Level::new(n).unwrap()),
-                    Err(Error::Unsupported(_))
-                ),
-                "level {n} should report the gap"
-            );
+            assert_eq!(back, raw, "level {n} bytes");
+            if n == 1 {
+                first_size = size;
+            }
+            if n == 12 {
+                assert!(
+                    size <= first_size,
+                    "level 12 ({size}) is worse than level 1 ({first_size})"
+                );
+            }
         }
     }
 }
