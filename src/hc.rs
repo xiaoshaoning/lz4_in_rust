@@ -1,7 +1,7 @@
 //! High-compression levels (`lib/lz4hc.c`): where `-2..-12` live.
 //!
 //! Three strategies, one file, because upstream keeps them together and they share the
-//! encoder ([`encode_sequence`]) and the match counter:
+//! encoder (`encode_sequence`) and the match counter:
 //!
 //! | levels | strategy | what decides a match |
 //! |---|---|---|

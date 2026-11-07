@@ -88,6 +88,8 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 | F31 | `short_inputs_are_all_literals` 只覆盖了 hash chain；`lz4mid` 与 optimal 各自的 `len < MIN_LENGTH` 早退分支**完全没测** | 新策略未覆盖（三条早退路径） | 三种策略各取一个等级（2 / 9 / 12）跑同样的 0、1、12 字节用例 |
 | F32 | C 里的 `assert(pos8 < ipIndex)` / `assert(pos4 < ipIndex)` 没有对应断言（`lz4mid` 的哈希表只应存过去的位置） | 缺失不变式 | 补 `debug_assert!`；顺带把小缓冲区与等级越界的测试从单一等级扩到三种策略 |
 
+| F33 | 模块文档里写 `[`encode_sequence`]`（intra-doc 链接）指向一个**私有**函数 → `cargo doc -D warnings` 报 `private_intra_doc_links`。本地没发现因为那次提交我只跑了 clippy + test，**跳过了 doc 这一步**；CI 抓到的 | 检查流程漏了一步（不是代码问题） | 改成反引号（不链接）；并把结论记下来：`cargo doc` 必须和 clippy/fmt/test 一起跑，否则"文档门"形同虚设 |
+
 第七轮**核实过、没问题**的：
 
 - `lz4mid` 的 `end_index - 2 < ilimit` 守卫与 C 一致，它同时保证 `ADDPOS8(ip-2)` 的 8 字节读在界内（`ip < len - 6`）。
