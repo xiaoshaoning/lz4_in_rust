@@ -379,3 +379,45 @@ CLI 默认行为对我们更有利。大机（≥ 5 核）仍与参考同式。
 参考点（仅供对照，不作为默认值来源）：在 4 P-core + 8 E-core 的 i7-1260P 上，
 `k0 = 12 - 2 = 10`，实测最好落在 4–6（受内存带宽和 E-core 拖累），
 即反馈循环应当把 k 从 10 降到 5–6 附近——这正是它在别的机器上要独立完成的工作。
+
+## 10. 代码评审（0.0.1 之前，2026-02）
+
+按"深模块 / 信息隐藏 / 错误模型"过一遍全部代码。**已修**的写在前面，**待定**的是要在
+M4b（frame）之前拍板的——因为 frame 恰好是它们的下一个消费者。
+
+### 已修（提交 `review: reject short blocks, unpoison the pool…`）
+
+| 问题 | 红标 | 处置 |
+|---|---|---|
+| `par::decompress_into` 接受"解出来的字节比槽位少"的块，返回 `Ok`，调用者缓冲区尾部留着旧字节 | 错误被定义掉了（不该定义掉的地方） | 新增 `decode_block()`：一个地方检查 `解出 == 槽位`，顺序路径与池路径共用；新增 `Error::BlockSizeMismatch`，回归测试用"最后一块只解出 20 字节而槽位要 808" |
+| 块数量不符时报 `Truncated`（看起来像输入被截断，实际是调用者的布局与数据不符） | Vague error / 掩盖信息 | 新增 `Error::BlockCountMismatch { expected, got }` |
+| `expect("control")` / `expect("queue")`：某个 worker panic 后锁被毒化，其余 worker 全部跟着 panic，原始失败被埋 | 重复 + 掩盖原始错误 | `lock()` 忽略毒化（受保护数据是计数器和工作数，两种状态下都一致）；join 到 panic 时 `resume_unwind` 保留原始 payload |
+| `block` 的拷贝辅助函数对长度恒定的切片做 `try_into().expect("wide")`：一个不可能失败、但一旦失败就会在"绝不该 panic 的解码器"里 panic 的分支 | 多余的失败点 | 改用 `copy_within` / `copy_from_slice`（长度由构造保证），少 4 个 `expect`，实测不慢 |
+| `lib.rs` 的文档把 `hc`/`frame` 写成 intra-doc 链接，但模块还不存在（`cargo doc` 两条 warning） | 文档描述了一个不存在的结构 | 改成表格 + 状态列；CI 增加 `RUSTDOCFLAGS="-D warnings" cargo doc` |
+| `decompress_into` 的公开文档里写实现细节（"96% 的匹配 ≤ 32 字节…"） | Implementation docs contaminate interface | 移进函数体的 `// Performance:` 注释，接口注释只留契约 |
+| `TABLE_SIZE` 没有说明为什么是 8192（byU16 需要，byU32 只用一半） | 注释缺失 | 补一行 |
+
+### 待定（frame 落地前拍板，按重要性）
+
+- **`Level` 与 `acceleration` 要合并到一个模块**（信息泄漏，最高优先）。现在 `par` 里
+   两处写死 `compress_into(…, 1)`；HC 一来，"1–2 走 acceleration、3–12 走 HC"这条映射就会
+   同时出现在 `par`、`frame`、CLI 三个地方。最小修法：新增 `level` 模块持有
+   `Level(1..=12) -> { Fast{acceleration}, High{level} }` 与 `compress(src, dst, level)`，
+   `par`/`frame`/CLI 只认 `Level`。**这是一个调用点改，现在改成本最低。**
+- **`par::compress` 会把所有块都物化**（`Vec<Vec<u8>>`）：峰值内存 O(输入)，和 §9 承诺的
+   `k × blockSize × 2` 预算矛盾。frame 编码器想要的正是"每块压完立刻写出去"。
+   最小修法：加 `compress_each(src, opts, |index, bytes| …)`（sink 形态），`compress` 变成
+   它的便利包装。**同样是在 frame 写之前改，否则 frame 会按物化形态实现。**
+- **`Error::Unsupported(&'static str)` 是未来 frame 的垃圾桶**（保留位、未知 block size、
+   legacy 帧都会往里塞字符串）。建议现在定调：*种类*用命名变体，字符串只用于消息。
+- **两段 worker 骨架重复**（compress 用原子游标 + join 回收，decompress 用 mutex 栈原地写）。
+   队列形状不同是**有理由的**（压缩不能预分配全部输出块，否则破坏内存预算），但
+   "advise k / 计时 / report / join" 这套骨架可以合成一个 `Scheduler`，只留 6 行差异。
+   等 frame 解码器成为第三个消费者之前做，最划算。
+- **`plan_with` 的 `avail` 参数是公开的**（只给测试和受限主机用）。要么在文档里写明，
+   要么把 `plan_with` 收进 `#[cfg(test)]` + 一个 `plan_on(opts, len, avail)`，
+   避免调用方随手编一个核数。
+- **`par` 有 6 个公开策略常量**（`MIN_PARALLEL_BLOCK`、`SMALL_HOST_CORES`…）。CLI 的帮助
+   文本确实要用，但应在文档里声明它们是**策略**、不是调用方可调的旋钮。
+- 测试名 `auto_matches_single_on_this_machine` 已改名为 `auto_matches_single`：断言与机器
+   无关，名字里带 "on this machine" 会让后来者不敢信这个测试。

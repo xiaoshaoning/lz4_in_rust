@@ -8,11 +8,12 @@
 //!
 //! Layers, in implementation order:
 //!
-//! | module   | format                | reference C code |
-//! |----------|-----------------------|------------------|
-//! | [`block`]| LZ4 block             | `lib/lz4.c`      |
-//! | [`hc`]   | LZ4 block, high ratio | `lib/lz4hc.c`    |
-//! | [`frame`]| LZ4 frame + XXH32     | `lib/lz4frame.c` |
+//! | module   | format                | reference C code | state |
+//! |----------|-----------------------|------------------|-------|
+//! | [`block`]| LZ4 block             | `lib/lz4.c`      | done  |
+//! | `par`    | independent blocks    | — (new)          | done  |
+//! | `hc`     | LZ4 block, high ratio | `lib/lz4hc.c`    | next  |
+//! | `frame`  | LZ4 frame + XXH32     | `lib/lz4frame.c` | next  |
 //!
 //! Compatibility is the contract: `lz4 -d` must read what we produce, and every block
 //! `lz4` produces must decode here. `tests/` checks both directions against fixtures
@@ -37,6 +38,11 @@ pub enum Error {
     InvalidOffset(usize),
     /// The destination slice cannot hold the decoded result.
     OutputTooSmall { need: usize, have: usize },
+    /// A block decoded to a different size than its slot: either the stream is corrupt or
+    /// the caller's block layout (block size / total length) does not match the data.
+    BlockSizeMismatch { expected: usize, got: usize },
+    /// The number of blocks handed to the parallel decoder does not match the layout.
+    BlockCountMismatch { expected: usize, got: usize },
     /// A single input block exceeds the format limit (`LZ4_MAX_INPUT_SIZE`).
     InputTooLarge(usize),
     /// `xxh32` digest in the data does not match the data.
@@ -52,6 +58,12 @@ impl core::fmt::Display for Error {
             Error::InvalidOffset(o) => write!(f, "invalid match offset {o}"),
             Error::OutputTooSmall { need, have } => {
                 write!(f, "output too small: need {need} bytes, have {have}")
+            }
+            Error::BlockSizeMismatch { expected, got } => {
+                write!(f, "block decoded to {got} bytes, slot holds {expected}")
+            }
+            Error::BlockCountMismatch { expected, got } => {
+                write!(f, "expected {expected} blocks, got {got}")
             }
             Error::InputTooLarge(n) => write!(f, "input block of {n} bytes is too large"),
             Error::ChecksumMismatch { expected, actual } => {

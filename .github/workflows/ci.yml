@@ -24,6 +24,9 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: docs (broken intra-doc links are errors)
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
       - name: tests (no C toolchain needed: fixtures are committed)
         run: cargo test --release
 

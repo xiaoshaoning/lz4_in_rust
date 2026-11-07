@@ -16,7 +16,7 @@
 //! `&mut [u8]` slices from a `Mutex`-guarded stack.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use crate::{block, Error};
@@ -117,6 +117,13 @@ pub fn plan_with(opts: &Opts, input_len: usize, avail: usize) -> Plan {
     }
 }
 
+/// A poisoned lock means a worker panicked; the guarded data here is a counter and a
+/// worker count, which are consistent either way. Cascading `expect("control")` panics
+/// from every *other* worker would only bury the original failure.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn available_workers() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get())
 }
@@ -178,6 +185,23 @@ impl Control {
     }
 }
 
+/// Decode one block into the exact slot the layout assigned it.
+///
+/// `block::decompress_into` returns however many bytes the stream holds, which may be
+/// fewer than the slot: accepting that would leave the caller's buffer partly stale and
+/// call it success, so the size check lives here, once, for both the sequential and the
+/// pooled path.
+fn decode_block(packed: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
+    let n = block::decompress_into(packed, dst)?;
+    if n != dst.len() {
+        return Err(Error::BlockSizeMismatch {
+            expected: dst.len(),
+            got: n,
+        });
+    }
+    Ok(n)
+}
+
 /// Compress `src` as independent blocks of `plan.block_size`.
 ///
 /// The result is in input order and does not depend on the worker count.
@@ -217,7 +241,7 @@ pub fn compress_with(src: &[u8], opts: &Opts, avail: usize) -> Result<Vec<Vec<u8
                 s.spawn(move || -> Result<Vec<(usize, Vec<u8>)>, Error> {
                     let mut mine = Vec::new();
                     loop {
-                        if id >= control.lock().expect("control").k {
+                        if id >= lock(control).k {
                             break; // the controller shrank below us
                         }
                         let i = cursor.fetch_add(1, Ordering::Relaxed);
@@ -231,10 +255,7 @@ pub fn compress_with(src: &[u8], opts: &Opts, avail: usize) -> Result<Vec<Vec<u8
                         let n = block::compress_into(&src[r], &mut buf, 1)?;
                         buf.truncate(n);
                         mine.push((i, buf));
-                        let _ = control
-                            .lock()
-                            .expect("control")
-                            .report(raw_len, started.elapsed().as_secs_f64());
+                        lock(control).report(raw_len, started.elapsed().as_secs_f64());
                     }
                     Ok(mine)
                 })
@@ -242,7 +263,10 @@ pub fn compress_with(src: &[u8], opts: &Opts, avail: usize) -> Result<Vec<Vec<u8
             .collect();
         let mut all = Vec::new();
         for h in handles {
-            all.extend(h.join().expect("worker thread")?);
+            all.extend(
+                h.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?,
+            );
         }
         Ok::<_, Error>(all)
     })?;
@@ -279,7 +303,10 @@ pub fn decompress_into_with(
     let plan = plan_with(opts, out.len(), avail);
 
     if blocks.len() != plan.blocks {
-        return Err(Error::Truncated);
+        return Err(Error::BlockCountMismatch {
+            expected: plan.blocks,
+            got: blocks.len(),
+        });
     }
 
     // one linear pass over the output, split into per-block slices
@@ -294,7 +321,7 @@ pub fn decompress_into_with(
 
     if plan.workers <= 1 || plan.blocks <= 1 {
         for (i, dst) in jobs {
-            block::decompress_into(blocks[i], dst)?;
+            decode_block(blocks[i], dst)?;
         }
         return Ok(());
     }
@@ -307,24 +334,22 @@ pub fn decompress_into_with(
                 let (queue, control) = (&queue, &control);
                 s.spawn(move || -> Result<(), Error> {
                     loop {
-                        if id >= control.lock().expect("control").k {
+                        if id >= lock(control).k {
                             break;
                         }
-                        let job = queue.lock().expect("queue").pop();
+                        let job = lock(queue).pop();
                         let Some((i, dst)) = job else { break };
                         let started = Instant::now();
-                        let n = block::decompress_into(blocks[i], dst)?;
-                        let _ = control
-                            .lock()
-                            .expect("control")
-                            .report(n, started.elapsed().as_secs_f64());
+                        let n = decode_block(blocks[i], dst)?;
+                        lock(control).report(n, started.elapsed().as_secs_f64());
                     }
                     Ok(())
                 })
             })
             .collect();
         for h in handles {
-            h.join().expect("worker thread")?;
+            h.join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
         }
         Ok(())
     })
@@ -576,7 +601,7 @@ mod tests {
     /// `Auto` must produce exactly the same bytes as `Single` — this is what lets a CLI
     /// change the thread count without changing the output.
     #[test]
-    fn auto_matches_single_on_this_machine() {
+    fn auto_matches_single() {
         let src = corpus(3 * MIN_PARALLEL_BLOCK + 1234);
         let auto = par_opts(Workers::Auto);
         let single = par_opts(Workers::Single);
@@ -612,6 +637,35 @@ mod tests {
         );
     }
 
+    /// Regression: a block that decodes to *fewer* bytes than its slot used to be
+    /// accepted, leaving stale bytes in the caller's buffer and returning `Ok`.
+    #[test]
+    fn short_block_is_rejected() {
+        let src = corpus(9000);
+        let o = opts(Workers::Fixed(2), 4096);
+        let blocks = compress_with(&src, &o, 16).unwrap();
+        let mut short = vec![0u8; block::compress_bound(20)];
+        let n = block::compress_into(&src[..20], &mut short, 1).unwrap();
+        let mut broken: Vec<Vec<u8>> = blocks.clone();
+        broken[2] = short[..n].to_vec(); // last slot wants 808 bytes
+        let refs: Vec<&[u8]> = broken.iter().map(|b| b.as_slice()).collect();
+        assert!(matches!(
+            decode(&refs, 9000, &o, 16),
+            Err(Error::BlockSizeMismatch {
+                expected: 808,
+                got: 20
+            })
+        ));
+        // and through the single-threaded path too: same helper, same answer
+        assert!(matches!(
+            decode(&refs, 9000, &opts(Workers::Single, 4096), 16),
+            Err(Error::BlockSizeMismatch {
+                expected: 808,
+                got: 20
+            })
+        ));
+    }
+
     #[test]
     fn corrupt_block_is_an_error_not_a_panic() {
         let src = corpus(40_000);
@@ -633,7 +687,13 @@ mod tests {
         let blocks = compress_with(&src, &o, 16).unwrap();
         let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
         // one block missing
-        assert!(decode(&refs[..1], 9000, &o, 16).is_err());
+        assert!(matches!(
+            decode(&refs[..1], 9000, &o, 16),
+            Err(Error::BlockCountMismatch {
+                expected: 3,
+                got: 1
+            })
+        ));
         // claiming a shorter original than the blocks decode to
         assert!(decode(&refs, 4096, &o, 16).is_err());
     }

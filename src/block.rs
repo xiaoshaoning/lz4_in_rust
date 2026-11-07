@@ -37,6 +37,8 @@ const HASH_LOG: u32 = 12;
 /// Inputs below this use the reference's `byU16` table with one more hash bit
 /// (`LZ4_64Klimit`); the table shape is part of the output, so the port keeps both.
 const SMALL_INPUT_LIMIT: usize = 64 * 1024 + MFLIMIT - 1;
+/// Sized for the wider of the two tables: `byU16` has one more hash bit than `byU32`,
+/// and both shapes share this one array (32 KiB, per call, on the stack).
 const TABLE_SIZE: usize = 1 << (HASH_LOG + 1);
 /// Number of hash probes before the skip step grows (`LZ4_skipTrigger`).
 const SKIP_TRIGGER: u32 = 6;
@@ -216,12 +218,12 @@ fn next_match_at<const BY_U16: bool>(
 /// `Error::OutputTooSmall`. Trailing input bytes are an error, not a silently
 /// accepted tail (the reference returns a short count instead; nobody relies on it).
 ///
-/// Hot path, measured on real text: 96% of matches are <= 32 bytes and 95% start
-/// more than 32 bytes back, 89% of literal runs are <= 4 bytes. So almost every run
-/// becomes **one wide move** (`[u8; 32]`, which rustc lowers to whatever the target
-/// supports — SSE2 by default, AVX2 with `-C target-cpu=x86-64-v3`), with the exact
-/// and overlapping paths kept for the rest. Writing up to 31 bytes past a run's logical
-/// end is safe: output is produced front to back and matches only read behind `op`.
+// Performance: on real text 96% of matches are <= 32 bytes, 95% start more than 32 bytes
+// back and 89% of literal runs are <= 4 bytes, so almost every run becomes one wide move
+// (`[u8; 32]` lowers to whatever the target supports — SSE2 by default, AVX2 with
+// `-C target-cpu=x86-64-v3`); the exact and overlapping paths cover the rest. Writing up
+// to 31 bytes past a run's logical end is safe: output is produced front to back and
+// matches only read behind `op`. Measured and rejected alternatives: docs/DESIGN.md §2.
 pub fn decompress_into(src: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
     decompress_impl(src, dst)
 }
@@ -386,28 +388,28 @@ fn copy_exact_from(src: &[u8], dst: &mut [u8], at: usize, from: usize, len: usiz
     dst[at..at + len].copy_from_slice(&src[from..from + len]);
 }
 
+// The four moves below copy between slices of the same constant length, so there is no
+// length to convert or check: `copy_from_slice` lowers to one vector load + store (or two,
+// for WIDE on SSE2) exactly like the array conversion it replaces, without an unreachable
+// `expect` sitting in a decoder that must never panic.
 #[inline(always)]
 fn copy_wide_from(src: &[u8], dst: &mut [u8], at: usize, from: usize) {
-    let b: [u8; WIDE] = src[from..from + WIDE].try_into().expect("wide");
-    dst[at..at + WIDE].copy_from_slice(&b);
+    dst[at..at + WIDE].copy_from_slice(&src[from..from + WIDE]);
 }
 
 #[inline(always)]
 fn copy_wide(dst: &mut [u8], at: usize, from: usize) {
-    let b: [u8; WIDE] = dst[from..from + WIDE].try_into().expect("wide");
-    dst[at..at + WIDE].copy_from_slice(&b);
+    dst.copy_within(from..from + WIDE, at);
 }
 
 #[inline(always)]
 fn copy16(dst: &mut [u8], at: usize, from: usize) {
-    let b: [u8; 16] = dst[from..from + 16].try_into().expect("16");
-    dst[at..at + 16].copy_from_slice(&b);
+    dst.copy_within(from..from + 16, at);
 }
 
 #[inline(always)]
 fn copy8(dst: &mut [u8], at: usize, from: usize) {
-    let b: [u8; 8] = dst[from..from + 8].try_into().expect("8");
-    dst[at..at + 8].copy_from_slice(&b);
+    dst.copy_within(from..from + 8, at);
 }
 
 /// Distances below 8 cannot use a wide move (the source would still be unwritten),
