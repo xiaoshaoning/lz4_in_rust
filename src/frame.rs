@@ -58,11 +58,17 @@ pub enum BlockMode {
 /// The descriptor of a frame that was read, exactly as it was written there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameInfo {
+    /// Largest decoded block, in bytes (64 KiB..4 MiB).
     pub block_size: usize,
+    /// Whether a block may reference the 64 KiB before it.
     pub block_mode: BlockMode,
+    /// Whether each block carries its own XXH32.
     pub block_checksum: bool,
+    /// Whether the frame ends with an XXH32 of the whole content.
     pub content_checksum: bool,
+    /// Total content size, when the writer declared it.
     pub content_size: Option<u64>,
+    /// Dictionary id, when the writer declared one (this port cannot decode those).
     pub dict_id: Option<u32>,
 }
 
@@ -75,15 +81,22 @@ pub struct FrameInfo {
 /// size could disagree with the frame's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opts {
+    /// Block size: 64 KiB, 256 KiB, 1 MiB or 4 MiB.
     pub block_size: usize,
+    /// Independent blocks decode in parallel; linked ones compress better.
     pub block_mode: BlockMode,
+    /// Add a per-block XXH32 (costs 4 bytes per block, catches damage earlier).
     pub block_checksum: bool,
+    /// Add the whole-content XXH32 (the default, and what `lz4` writes).
     pub content_checksum: bool,
     /// Declare the content size in the descriptor. Requires knowing it up front, which is why
     /// it is a separate input of [`Encoder::new`] rather than a field of this struct.
     pub content_size: bool,
+    /// Compression level for the blocks.
     pub level: Level,
+    /// Who picks the worker count for the block pool.
     pub workers: Workers,
+    /// Peak-bytes ceiling for the pool's in-flight buffers.
     pub memory_budget: usize,
 }
 
@@ -105,7 +118,9 @@ impl Default for Opts {
 /// The result of decoding a whole buffer: the content, the descriptor, and where the frame ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decoded {
+    /// The decoded bytes.
     pub content: Vec<u8>,
+    /// The descriptor as it was written in the frame.
     pub info: FrameInfo,
     /// Bytes of the input this frame occupied: a caller looping over frames needs it.
     pub consumed: usize,

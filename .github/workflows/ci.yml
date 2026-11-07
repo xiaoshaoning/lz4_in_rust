@@ -43,6 +43,21 @@ jobs:
           LZ4_C_ORACLE=target/c-oracle LZ4_FUZZ_ROUNDS=150 \
             cargo test --release --workspace -- --nocapture
 
+      # the port keeps indices in u32 in places (hc's 64 KiB tables); 32-bit usize must work
+      - name: 32-bit build and tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-multilib
+          rustup target add i686-unknown-linux-gnu
+          cargo test --release --target i686-unknown-linux-gnu --workspace
+
+      # no big-endian runner exists; this at least proves the crate compiles there, and the
+      # format work is from_le_bytes throughout by construction
+      - name: big-endian compiles
+        run: |
+          rustup target add s390x-unknown-linux-gnu
+          cargo check --target s390x-unknown-linux-gnu --workspace
+
       # the fixtures are only worth what the pinned upstream produces for them
       - name: the pinned C version still reproduces our fixture digests
         run: |
@@ -84,3 +99,16 @@ jobs:
           set -eux
           LZ4_C_ORACLE=target/c-oracle.exe LZ4_FUZZ_ROUNDS=80 \
             cargo test --release --workspace -- --nocapture
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      # undefined-behaviour check; the crate is #![forbid(unsafe_code)], so this mostly
+      # guards the std interactions (slices, threads, I/O)
+      - name: miri
+        run: |
+          cargo miri test --lib -- 'block::' 'xxhash::' 'level::' 'hc::' 

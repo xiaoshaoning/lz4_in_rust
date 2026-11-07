@@ -23,6 +23,7 @@ pub struct Xxh32 {
 }
 
 impl Xxh32 {
+    /// A fresh hasher; the frame format always uses seed 0.
     pub fn new(seed: u32) -> Self {
         Xxh32 {
             lanes: [
@@ -45,6 +46,7 @@ impl Xxh32 {
         h.digest()
     }
 
+    /// Feed more bytes; any chunking gives the same digest.
     pub fn update(&mut self, mut data: &[u8]) {
         self.total += data.len() as u64;
 
@@ -85,6 +87,7 @@ impl Xxh32 {
         }
     }
 
+    /// The digest of everything fed so far (does not reset the state).
     pub fn digest(&self) -> u32 {
         let mut h = if self.total >= BLOCK as u64 {
             let [v1, v2, v3, v4] = self.lanes;

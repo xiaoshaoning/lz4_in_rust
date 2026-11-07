@@ -19,7 +19,9 @@ use crate::{block, Error};
 pub struct Level(u8);
 
 impl Level {
+    /// Fastest level (`lz4 -1`).
     pub const MIN: u8 = 1;
+    /// Slowest level (`lz4 -12`), the best ratio.
     pub const MAX: u8 = 12;
     /// First level that uses the high-compression parser (`LZ4HC_CLEVEL_MIN`).
     pub const FIRST_HIGH: u8 = 2;
@@ -32,6 +34,7 @@ impl Level {
         (Level::MIN..=Level::MAX).contains(&n).then_some(Level(n))
     }
 
+    /// The number as written on the command line.
     pub fn as_u8(self) -> u8 {
         self.0
     }

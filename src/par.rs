@@ -53,6 +53,7 @@ pub enum Workers {
 /// [`Workers::Auto`] and `--single-thread` to [`Workers::Single`], as the reference does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opts {
+    /// Who picks the worker count.
     pub workers: Workers,
     /// Job size in bytes; the frame layer passes its block size.
     pub block_size: usize,
@@ -62,6 +63,7 @@ pub struct Opts {
     pub level: Level,
 }
 
+/// The default policy: one thread, 4 MiB jobs, the default memory budget.
 impl Default for Opts {
     fn default() -> Self {
         Opts {
@@ -76,8 +78,11 @@ impl Default for Opts {
 /// What the strategy decided, before any thread is created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plan {
+    /// Workers the policy chose.
     pub workers: usize,
+    /// Job size after clamping to the frame format's limits.
     pub block_size: usize,
+    /// Number of jobs the input splits into.
     pub blocks: usize,
 }
 

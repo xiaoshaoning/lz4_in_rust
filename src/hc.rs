@@ -40,8 +40,9 @@ const MIN_LENGTH: usize = block::MFLIMIT + 1;
 const ML_MASK: usize = 15;
 const ML_BITS: u32 = 4;
 const RUN_MASK: usize = 15;
-/// The levels this module handles: `lz4mid` (2), hash chain (3..=9), optimal parser (10..=12).
+/// First level handled here (`lz4mid`); level 1 is [`crate::block`].
 pub const LEVEL_MIN: u8 = 2;
+/// Last level handled here (the optimal parser at 12); the CLI's `-1..-12` ends here.
 pub const LEVEL_MAX: u8 = 12;
 /// `lz4mid`: one hash table over 4 bytes and one over 7, `2^14` buckets each.
 const MID_HASHLOG: u32 = HASH_LOG - 1;
