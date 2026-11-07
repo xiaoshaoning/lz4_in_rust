@@ -26,9 +26,10 @@ writes a `.lz4` file yet.
 |---|---|---|---|
 | `xxhash` | XXH32, one-shot + streaming | `lib/xxhash.c` | ✅ equal to C on every fixture |
 | `block::decompress_into` | LZ4 block decoder | `lib/lz4.c` | ✅ decodes every level/distribution the C tool produces |
-| `block::compress_into` | LZ4 block encoder (levels 1–2, `acceleration`) | `lib/lz4.c` | ✅ **byte-identical** to C |
-| `par` | parallel block engine + adaptive worker policy | — (new) | ✅ output independent of thread count |
-| `hc` | high compression, levels 3–12 | `lib/lz4hc.c` | ⬜ next |
+| `block::compress_into` | LZ4 block encoder (fast tier, `acceleration`) | `lib/lz4.c` | ✅ **byte-identical** to C |
+| `level` | `-1..-12` → parser, in one place | `lib/lz4frame.c` | ✅ level 1; 2–12 report the gap |
+| `par` | parallel block engine + adaptive worker policy; `compress_each` streams blocks in order | — (new) | ✅ output independent of thread count |
+| `hc` | high compression, levels 2–12 | `lib/lz4hc.c` | ⬜ next |
 | `frame` | LZ4 frame format (header, blocks, XXH32, linked blocks) | `lib/lz4frame.c` | ⬜ planned |
 | CLI | `lz4`-compatible command line | `programs/` | ⬜ planned (GPL-2.0-or-later, unlike the rest) |
 
@@ -37,13 +38,14 @@ writes a `.lz4` file yet.
 | file | what it is |
 |---|---|
 | `docs/DESIGN.md` | **start here**: the decisions, the safety argument, the porting traps, the measurements, the roadmap |
+| `docs/REVIEW.md` | the code review and its plan checklist: what was fixed, what is left, and how each item is verified |
 | `tests/interop.rs` | what "compatible" means here, executable |
 | `tools/c_oracle.c` | the C reference wrapped for diff-testing (build, unblock, bench, xxh32) |
 
 ## Build and check
 
 ```sh
-cargo test                                   # 26 tests, no C toolchain needed (fixtures are committed)
+cargo test                                   # 34 tests, no C toolchain needed (fixtures are committed)
 cargo test --release                         # same, and much faster on the big roundtrips
 cargo clippy --all-targets && cargo fmt --check
 ```

@@ -117,7 +117,8 @@ offset 16..32 用 2×16 字节、8..16 用 4×8 字节（每次读的源都已�
 | `xxhash` | ✅ 一次性 + 流式，对 C 的 7 个语料 + 4 个标准向量判等 |
 | `block::decompress_into` | ✅ 解 C 压的所有 level（0/9/12）、所有分布；损坏输入只返回 `Err` |
 | `block::compress_into` | ✅ 逐字节等于 C（level 0 / acceleration 任意） |
-| `par`（并行块引擎 + 自适应线程数） | ✅ `plan`/`Control` 纯函数 + 池；12 个单测 |
+| `level` | ✅ `-1..-12` → 解析器的唯一映射（`src/level.rs`，4 个单测） |
+| `par`（并行块引擎 + 自适应线程数） | ✅ `plan`/`Control` 纯函数 + 池 + 按序流式交付；15 个单测 |
 | `hc`（3..=12） | ⬜ M3 |
 | `frame` | ⬜ M4 |
 | CLI | ⬜ M5 |
@@ -331,14 +332,16 @@ state: k = k0, best = 0, cooldown = 0, elapsed = 0, bytes = 0
 
 ```rust
 pub enum Workers { Auto, Fixed(usize), Single }
-pub struct Opts { workers: Workers, block_size: usize, memory_budget: usize }   // 默认 Single
+pub struct Opts { workers: Workers, block_size: usize, memory_budget: usize, level: Level }
 pub fn plan_with(opts, input_len, avail) -> Plan { workers, block_size, blocks } // 纯函数，可单测
-pub fn compress_with(src, opts, avail) -> Result<Vec<Vec<u8>>, Error>
+pub fn compress_each(src, opts, sink: |index, bytes|) -> Result<(), E>           // 按序流式
+pub fn compress_with(src, opts, avail) -> Result<Vec<Vec<u8>>, Error>            // 收集型包装
 pub fn decompress_into_with(blocks, out: &mut [u8], opts, avail) -> Result<(), Error>
 pub fn decompress(blocks, original_len, opts) -> Result<Vec<u8>, Error>          // 便利包装
 ```
 
-- 队列：`AtomicUsize` 游标，worker 取号即走；压缩结果经 join 句柄回收后按块号排序，
+- 队列：`AtomicUsize` 游标，worker 取号即走。压缩用"完成窗口"（`Mutex<BTreeMap>` + `Condvar`）
+  交给调用线程**按序**流式取走，窗口 ≤ `workers+1` 块 —— 这就是 frame 编码器要的形状；
   解压用 `Mutex<Vec<(usize, &mut [u8])>>` 发放互不重叠的输出切片 → **零 unsafe、零热路径锁**。
 - 解压**不自己分配**输出：`decompress_into` 拿调用者的缓冲。之前 `decompress` 每次
   `vec![0; 32MB]` 让"单线程"路径看起来慢了 21%（清零/缺页），改成复用后回到 1.00x。
@@ -380,44 +383,9 @@ CLI 默认行为对我们更有利。大机（≥ 5 核）仍与参考同式。
 `k0 = 12 - 2 = 10`，实测最好落在 4–6（受内存带宽和 E-core 拖累），
 即反馈循环应当把 k 从 10 降到 5–6 附近——这正是它在别的机器上要独立完成的工作。
 
-## 10. 代码评审（0.0.1 之前，2026-02）
+## 10. 代码评审
 
-按"深模块 / 信息隐藏 / 错误模型"过一遍全部代码。**已修**的写在前面，**待定**的是要在
-M4b（frame）之前拍板的——因为 frame 恰好是它们的下一个消费者。
+评审结论、已修项与后续计划清单都在 **`docs/REVIEW.md`**（含每项的证据、最小修法与验收方式）。
+这里不重复，只保留一条判断：纯 safe 的上限（§5）和 frame 落地前的结构债（`level` 模块、
+`compress_each`）都已处理，剩下的都是 E1–E6 的工程项与 M3/M4b/M5 的里程碑。
 
-### 已修（提交 `review: reject short blocks, unpoison the pool…`）
-
-| 问题 | 红标 | 处置 |
-|---|---|---|
-| `par::decompress_into` 接受"解出来的字节比槽位少"的块，返回 `Ok`，调用者缓冲区尾部留着旧字节 | 错误被定义掉了（不该定义掉的地方） | 新增 `decode_block()`：一个地方检查 `解出 == 槽位`，顺序路径与池路径共用；新增 `Error::BlockSizeMismatch`，回归测试用"最后一块只解出 20 字节而槽位要 808" |
-| 块数量不符时报 `Truncated`（看起来像输入被截断，实际是调用者的布局与数据不符） | Vague error / 掩盖信息 | 新增 `Error::BlockCountMismatch { expected, got }` |
-| `expect("control")` / `expect("queue")`：某个 worker panic 后锁被毒化，其余 worker 全部跟着 panic，原始失败被埋 | 重复 + 掩盖原始错误 | `lock()` 忽略毒化（受保护数据是计数器和工作数，两种状态下都一致）；join 到 panic 时 `resume_unwind` 保留原始 payload |
-| `block` 的拷贝辅助函数对长度恒定的切片做 `try_into().expect("wide")`：一个不可能失败、但一旦失败就会在"绝不该 panic 的解码器"里 panic 的分支 | 多余的失败点 | 改用 `copy_within` / `copy_from_slice`（长度由构造保证），少 4 个 `expect`，实测不慢 |
-| `lib.rs` 的文档把 `hc`/`frame` 写成 intra-doc 链接，但模块还不存在（`cargo doc` 两条 warning） | 文档描述了一个不存在的结构 | 改成表格 + 状态列；CI 增加 `RUSTDOCFLAGS="-D warnings" cargo doc` |
-| `decompress_into` 的公开文档里写实现细节（"96% 的匹配 ≤ 32 字节…"） | Implementation docs contaminate interface | 移进函数体的 `// Performance:` 注释，接口注释只留契约 |
-| `TABLE_SIZE` 没有说明为什么是 8192（byU16 需要，byU32 只用一半） | 注释缺失 | 补一行 |
-
-### 待定（frame 落地前拍板，按重要性）
-
-- **`Level` 与 `acceleration` 要合并到一个模块**（信息泄漏，最高优先）。现在 `par` 里
-   两处写死 `compress_into(…, 1)`；HC 一来，"1–2 走 acceleration、3–12 走 HC"这条映射就会
-   同时出现在 `par`、`frame`、CLI 三个地方。最小修法：新增 `level` 模块持有
-   `Level(1..=12) -> { Fast{acceleration}, High{level} }` 与 `compress(src, dst, level)`，
-   `par`/`frame`/CLI 只认 `Level`。**这是一个调用点改，现在改成本最低。**
-- **`par::compress` 会把所有块都物化**（`Vec<Vec<u8>>`）：峰值内存 O(输入)，和 §9 承诺的
-   `k × blockSize × 2` 预算矛盾。frame 编码器想要的正是"每块压完立刻写出去"。
-   最小修法：加 `compress_each(src, opts, |index, bytes| …)`（sink 形态），`compress` 变成
-   它的便利包装。**同样是在 frame 写之前改，否则 frame 会按物化形态实现。**
-- **`Error::Unsupported(&'static str)` 是未来 frame 的垃圾桶**（保留位、未知 block size、
-   legacy 帧都会往里塞字符串）。建议现在定调：*种类*用命名变体，字符串只用于消息。
-- **两段 worker 骨架重复**（compress 用原子游标 + join 回收，decompress 用 mutex 栈原地写）。
-   队列形状不同是**有理由的**（压缩不能预分配全部输出块，否则破坏内存预算），但
-   "advise k / 计时 / report / join" 这套骨架可以合成一个 `Scheduler`，只留 6 行差异。
-   等 frame 解码器成为第三个消费者之前做，最划算。
-- **`plan_with` 的 `avail` 参数是公开的**（只给测试和受限主机用）。要么在文档里写明，
-   要么把 `plan_with` 收进 `#[cfg(test)]` + 一个 `plan_on(opts, len, avail)`，
-   避免调用方随手编一个核数。
-- **`par` 有 6 个公开策略常量**（`MIN_PARALLEL_BLOCK`、`SMALL_HOST_CORES`…）。CLI 的帮助
-   文本确实要用，但应在文档里声明它们是**策略**、不是调用方可调的旋钮。
-- 测试名 `auto_matches_single_on_this_machine` 已改名为 `auto_matches_single`：断言与机器
-   无关，名字里带 "on this machine" 会让后来者不敢信这个测试。

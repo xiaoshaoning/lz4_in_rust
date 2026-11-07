@@ -8,12 +8,13 @@
 //!
 //! Layers, in implementation order:
 //!
-//! | module   | format                | reference C code | state |
-//! |----------|-----------------------|------------------|-------|
-//! | [`block`]| LZ4 block             | `lib/lz4.c`      | done  |
-//! | `par`    | independent blocks    | — (new)          | done  |
-//! | `hc`     | LZ4 block, high ratio | `lib/lz4hc.c`    | next  |
-//! | `frame`  | LZ4 frame + XXH32     | `lib/lz4frame.c` | next  |
+//! | module       | format                | reference C code | state |
+//! |--------------|-----------------------|------------------|-------|
+//! | [`block`]    | LZ4 block             | `lib/lz4.c`      | done  |
+//! | [`level`]    | `-1..-12` → parser    | `lib/lz4frame.c` | done (2..12 → HC, not ported) |
+//! | [`par`]      | independent blocks    | — (new)          | done  |
+//! | `hc`         | LZ4 block, high ratio | `lib/lz4hc.c`    | next  |
+//! | `frame`      | LZ4 frame + XXH32     | `lib/lz4frame.c` | next  |
 //!
 //! Compatibility is the contract: `lz4 -d` must read what we produce, and every block
 //! `lz4` produces must decode here. `tests/` checks both directions against fixtures
@@ -22,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod block;
+pub mod level;
 pub mod par;
 pub mod xxhash;
 

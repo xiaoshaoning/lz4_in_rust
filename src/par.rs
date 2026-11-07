@@ -15,10 +15,12 @@
 //! results are returned through their join handles, and decoding hands out disjoint
 //! `&mut [u8]` slices from a `Mutex`-guarded stack.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
+use crate::level::{self, Level};
 use crate::{block, Error};
 
 /// Smallest block size worth parallelising: below this the lost cross-block matches cost
@@ -46,6 +48,9 @@ pub enum Workers {
 }
 
 /// Knobs for [`plan`] / [`compress`] / [`decompress`].
+///
+/// The library default is single-threaded; the `lz4`-compatible CLI maps "no `-T`" to
+/// [`Workers::Auto`] and `--single-thread` to [`Workers::Single`], as the reference does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Opts {
     pub workers: Workers,
@@ -53,6 +58,8 @@ pub struct Opts {
     pub block_size: usize,
     /// Peak-bytes ceiling for all in-flight buffers.
     pub memory_budget: usize,
+    /// Compression level; the parser choice lives in [`crate::level`], not here.
+    pub level: Level,
 }
 
 impl Default for Opts {
@@ -61,6 +68,7 @@ impl Default for Opts {
             workers: Workers::Single,
             block_size: MAX_BLOCK_SIZE,
             memory_budget: DEFAULT_MEMORY_BUDGET,
+            level: Level::FAST,
         }
     }
 }
@@ -211,70 +219,156 @@ pub fn compress(src: &[u8], opts: &Opts) -> Result<Vec<Vec<u8>>, Error> {
 
 /// [`compress`] with an explicit core count (tests / `-T#` on a restricted host).
 pub fn compress_with(src: &[u8], opts: &Opts, avail: usize) -> Result<Vec<Vec<u8>>, Error> {
+    let mut blocks = Vec::with_capacity(plan_with(opts, src.len(), avail).blocks);
+    compress_each_with(src, opts, avail, |_, bytes| {
+        blocks.push(bytes);
+        Ok(())
+    })?;
+    Ok(blocks)
+}
+
+/// Compress `src` block by block, handing each finished block to `sink` **in input order**.
+///
+/// This is the streaming form: a frame encoder writes each block out and drops it, so
+/// peak memory is the pool's window (`workers + 1` blocks, bounded by
+/// [`Opts::memory_budget`]) instead of the whole compressed output. [`compress`] is the
+/// convenience wrapper that collects them instead.
+///
+/// `sink` receives the block index and owns the block's buffer. Its error type is free
+/// (`E: From<Error>`), so a caller that also does I/O keeps its own error type — the codec
+/// errors are converted into it instead of being flattened into the caller's API.
+pub fn compress_each<F, E>(src: &[u8], opts: &Opts, sink: F) -> Result<(), E>
+where
+    F: FnMut(usize, Vec<u8>) -> Result<(), E>,
+    E: From<Error> + Send,
+{
+    compress_each_with(src, opts, available_workers(), sink)
+}
+
+/// [`compress_each`] with an explicit core count.
+pub fn compress_each_with<F, E>(src: &[u8], opts: &Opts, avail: usize, mut sink: F) -> Result<(), E>
+where
+    F: FnMut(usize, Vec<u8>) -> Result<(), E>,
+    E: From<Error> + Send,
+{
     let plan = plan_with(opts, src.len(), avail);
     let range = |i: usize| {
         let start = i * plan.block_size;
         let end = (start + plan.block_size).min(src.len());
         start..end
     };
+    let one = |i: usize| -> Result<Vec<u8>, Error> {
+        let r = range(i);
+        let mut buf = vec![0u8; block::compress_bound(r.len())];
+        let n = level::compress_into(&src[r], &mut buf, opts.level)?;
+        buf.truncate(n);
+        Ok(buf)
+    };
 
     if plan.workers <= 1 || plan.blocks <= 1 {
-        let mut out = Vec::with_capacity(plan.blocks);
         for i in 0..plan.blocks {
-            let r = range(i);
-            let mut buf = vec![0u8; block::compress_bound(r.len())];
-            let n = block::compress_into(&src[r], &mut buf, 1)?;
-            buf.truncate(n);
-            out.push(buf);
+            sink(i, one(i)?)?;
         }
-        return Ok(out);
+        return Ok(());
     }
 
+    // Workers fill a window of finished blocks; the calling thread drains it in order.
+    // `announce` wakes the drainer, `cancel` stops the workers when the drainer gives up
+    // (sink error) or when a worker fails.
     let cursor = AtomicUsize::new(0);
+    let cancel = AtomicBool::new(false);
     let control = Mutex::new(Control::new(plan, plan.workers));
+    let ready: Mutex<BTreeMap<usize, Vec<u8>>> = Mutex::new(BTreeMap::new());
+    let announce = Condvar::new();
 
-    let mut collected: Vec<(usize, Vec<u8>)> = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..plan.workers)
-            .map(|id| {
-                let (cursor, control) = (&cursor, &control);
-                let range = &range;
-                s.spawn(move || -> Result<Vec<(usize, Vec<u8>)>, Error> {
-                    let mut mine = Vec::new();
-                    loop {
-                        if id >= lock(control).k {
-                            break; // the controller shrank below us
-                        }
-                        let i = cursor.fetch_add(1, Ordering::Relaxed);
-                        if i >= plan.blocks {
-                            break; // the queue is empty
-                        }
-                        let r = range(i);
-                        let raw_len = r.len();
-                        let started = Instant::now();
-                        let mut buf = vec![0u8; block::compress_bound(raw_len)];
-                        let n = block::compress_into(&src[r], &mut buf, 1)?;
-                        buf.truncate(n);
-                        mine.push((i, buf));
-                        lock(control).report(raw_len, started.elapsed().as_secs_f64());
+    std::thread::scope(|s| -> Result<(), E> {
+        let mut handles = Vec::with_capacity(plan.workers);
+        for id in 0..plan.workers {
+            let (cursor, cancel, control) = (&cursor, &cancel, &control);
+            let (ready, announce) = (&ready, &announce);
+            let range = &range;
+            handles.push(s.spawn(move || -> Result<(), E> {
+                let mut wake = WakeOnFailure {
+                    cancel,
+                    announce,
+                    armed: true,
+                };
+                loop {
+                    if cancel.load(Ordering::Relaxed) || id >= lock(control).k {
+                        break; // cancelled, or the controller shrank below us
                     }
-                    Ok(mine)
-                })
-            })
-            .collect();
-        let mut all = Vec::new();
-        for h in handles {
-            all.extend(
-                h.join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?,
-            );
+                    let i = cursor.fetch_add(1, Ordering::Relaxed);
+                    if i >= plan.blocks {
+                        break; // the queue is empty
+                    }
+                    let r = range(i);
+                    let raw_len = r.len();
+                    let started = Instant::now();
+                    let mut buf = vec![0u8; block::compress_bound(raw_len)];
+                    let n = level::compress_into(&src[r], &mut buf, opts.level)?;
+                    buf.truncate(n);
+                    lock(ready).insert(i, buf);
+                    announce.notify_all();
+                    lock(control).report(raw_len, started.elapsed().as_secs_f64());
+                }
+                wake.armed = false;
+                Ok(())
+            }));
         }
-        Ok::<_, Error>(all)
-    })?;
 
-    collected.sort_unstable_by_key(|(i, _)| *i);
-    let out: Vec<Vec<u8>> = collected.into_iter().map(|(_, b)| b).collect();
-    debug_assert_eq!(out.len(), plan.blocks);
-    Ok(out)
+        let mut next = 0usize;
+        while next < plan.blocks {
+            let block = {
+                let mut q: MutexGuard<BTreeMap<usize, Vec<u8>>> = lock(&ready);
+                loop {
+                    if let Some(bytes) = q.remove(&next) {
+                        break Some(bytes);
+                    }
+                    if cancel.load(Ordering::Relaxed) {
+                        break None; // a worker gave up; its error comes back at the join
+                    }
+                    q = announce.wait(q).unwrap_or_else(PoisonError::into_inner);
+                }
+            };
+            let Some(bytes) = block else { break };
+            if let Err(e) = sink(next, bytes) {
+                cancel.store(true, Ordering::Relaxed);
+                announce.notify_all();
+                return Err(e);
+            }
+            next += 1;
+        }
+
+        let mut failure: Option<E> = None;
+        for h in handles {
+            match h
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            {
+                Ok(()) => {}
+                Err(e) => failure = failure.or(Some(e)),
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    })
+}
+
+/// Makes sure the draining thread is woken when a worker fails or panics, so it cannot
+/// block forever on `announce`. A worker that finished normally disarms it: setting
+/// `cancel` then would abort its still-running siblings.
+struct WakeOnFailure<'a> {
+    cancel: &'a AtomicBool,
+    announce: &'a Condvar,
+    armed: bool,
+}
+
+impl Drop for WakeOnFailure<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancel.store(true, Ordering::Relaxed);
+            self.announce.notify_all();
+        }
+    }
 }
 
 /// Decompress independent blocks into `out`, which must be exactly `original_len` bytes.
@@ -364,6 +458,7 @@ mod tests {
             workers,
             block_size,
             memory_budget: DEFAULT_MEMORY_BUDGET,
+            ..Opts::default()
         }
     }
 
@@ -396,6 +491,7 @@ mod tests {
             workers: Workers::Auto,
             block_size: MAX_BLOCK_SIZE,
             memory_budget: 1 << 30,
+            ..Opts::default()
         };
         let big = 512 << 20;
         // <= SMALL_HOST_CORES: use them all; above: avail - (1 + avail/8)
@@ -448,6 +544,7 @@ mod tests {
             workers: Workers::Auto,
             block_size: MAX_BLOCK_SIZE,
             memory_budget: 8 << 20,
+            ..Opts::default()
         };
         assert_eq!(
             plan_with(&o, 1 << 30, 16).workers,
@@ -458,6 +555,7 @@ mod tests {
             workers: Workers::Auto,
             block_size: MAX_BLOCK_SIZE,
             memory_budget: 64 << 20,
+            ..Opts::default()
         };
         assert_eq!(
             plan_with(&o, 1 << 30, 16).workers,
@@ -616,8 +714,99 @@ mod tests {
         Opts {
             workers,
             block_size: MIN_PARALLEL_BLOCK,
-            memory_budget: DEFAULT_MEMORY_BUDGET,
+            ..Opts::default()
         }
+    }
+
+    /// The streaming form: blocks arrive in input order, exactly once, and concatenate to
+    /// the same bytes the collecting form returns.
+    #[test]
+    fn compress_each_delivers_in_order_exactly_once() {
+        let src = corpus(120_000);
+        let o = opts(Workers::Fixed(4), 4096);
+        let mut seen: Vec<(usize, Vec<u8>)> = Vec::new();
+        compress_each_with(&src, &o, 8, |i, bytes| {
+            seen.push((i, bytes));
+            Ok::<(), Error>(())
+        })
+        .unwrap();
+
+        let expected = compress_with(&src, &o, 8).unwrap();
+        let indices: Vec<usize> = seen.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indices, (0..expected.len()).collect::<Vec<_>>(), "order");
+        let streamed: Vec<Vec<u8>> = seen.into_iter().map(|(_, b)| b).collect();
+        assert_eq!(streamed, expected);
+
+        // empty input: no blocks, no calls
+        let mut calls = 0;
+        compress_each(&[], &o, |_, _| {
+            calls += 1;
+            Ok::<(), Error>(())
+        })
+        .unwrap();
+        assert_eq!(calls, 0);
+    }
+
+    /// A caller with its own error type (the frame writer will have one for I/O) keeps it:
+    /// codec errors convert in, and the sink's error comes back out unchanged.
+    #[test]
+    fn compress_each_propagates_the_sink_error_without_hanging() {
+        #[derive(Debug, PartialEq)]
+        enum Sink {
+            Codec(Error),
+            Stop(usize),
+        }
+        impl From<Error> for Sink {
+            fn from(e: Error) -> Self {
+                Sink::Codec(e)
+            }
+        }
+
+        let src = corpus(200_000);
+        let o = opts(Workers::Fixed(4), 4096);
+        let got = compress_each_with(&src, &o, 8, |i, _bytes| {
+            if i == 2 {
+                Err(Sink::Stop(i))
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(got, Err(Sink::Stop(2)));
+
+        // and a codec error (a level that is not ported yet) converts into the caller's type
+        let hi = Opts {
+            level: Level::new(9).unwrap(),
+            ..opts(Workers::Fixed(2), 4096)
+        };
+        assert!(matches!(
+            compress_each_with(&src, &hi, 8, |_, _| Ok(())),
+            Err(Sink::Codec(Error::Unsupported(_)))
+        ));
+    }
+
+    /// End to end: the level is honoured by the pool, and levels above 1 report the gap
+    /// rather than silently compressing at level 1.
+    #[test]
+    fn level_flows_through_the_pool() {
+        let src = corpus(40_000);
+        let fast = opts(Workers::Fixed(2), 4096);
+        let ours = compress_with(&src, &fast, 4).unwrap();
+        let mut one = vec![0u8; block::compress_bound(4096)];
+        let mut expected = Vec::new();
+        for r in src.chunks(4096) {
+            let n = block::compress_into(r, &mut one, 1).unwrap();
+            expected.push(one[..n].to_vec());
+        }
+        assert_eq!(ours, expected, "level 1 must be the C default parser");
+
+        let hi = Opts {
+            level: Level::new(9).unwrap(),
+            ..opts(Workers::Fixed(2), 4096)
+        };
+        assert!(matches!(
+            compress_with(&src, &hi, 4),
+            Err(Error::Unsupported(_))
+        ));
     }
 
     #[test]
@@ -704,12 +893,14 @@ mod tests {
             workers: Workers::Auto,
             block_size: 1 << 30,
             memory_budget: DEFAULT_MEMORY_BUDGET,
+            ..Opts::default()
         };
         assert_eq!(plan_with(&o, 1 << 30, 16).block_size, MAX_BLOCK_SIZE);
         let o = Opts {
             workers: Workers::Auto,
             block_size: 0,
             memory_budget: DEFAULT_MEMORY_BUDGET,
+            ..Opts::default()
         };
         assert_eq!(plan_with(&o, 10, 16).block_size, 1);
     }
