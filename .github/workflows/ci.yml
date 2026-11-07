@@ -52,9 +52,8 @@ jobs:
 
   windows:
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
+    # No job-wide msys2 shell: rustup puts cargo on the *Windows* PATH, which the msys2
+    # shell does not inherit, so cargo steps run in Git bash and only the C build uses msys2.
     steps:
       - uses: actions/checkout@v4
       - uses: msys2/setup-msys2@v2
@@ -66,9 +65,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: tests
+        shell: bash
         run: cargo test --release --workspace
 
-      - name: differential tests against the C reference
+      - name: build the C reference oracle (msys2 gcc)
+        shell: msys2 {0}
         run: |
           set -eux
           git clone --quiet "$LZ4_REPO" /tmp/lz4
@@ -76,5 +77,10 @@ jobs:
           mkdir -p target
           cc -O2 -I/tmp/lz4/lib -o target/c-oracle.exe tools/c_oracle.c \
              /tmp/lz4/lib/lz4.c /tmp/lz4/lib/lz4hc.c /tmp/lz4/lib/xxhash.c /tmp/lz4/lib/lz4frame.c
+
+      - name: differential tests against the C reference
+        shell: bash
+        run: |
+          set -eux
           LZ4_C_ORACLE=target/c-oracle.exe LZ4_FUZZ_ROUNDS=80 \
             cargo test --release --workspace -- --nocapture
