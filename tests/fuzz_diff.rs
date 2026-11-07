@@ -194,6 +194,35 @@ impl Fixture<'_> {
         assert_eq!(out, src, "{what}: decoded bytes, C level {level}");
     }
 
+    /// The high-compression parser must agree with C's, level by level.
+    fn hc_bytes_match_c(&self, src: &[u8], level: u8, what: &str) {
+        std::fs::write(&self.raw, src).unwrap();
+        assert!(oracle_run(
+            self.oracle,
+            &[
+                OsStr::new("block"),
+                OsStr::new(&level.to_string()),
+                self.raw.as_os_str(),
+                self.packed.as_os_str(),
+            ]
+        ));
+        let theirs = std::fs::read(&self.packed).unwrap();
+        let mut ours = vec![0u8; block::compress_bound(src.len())];
+        let n = lz4_in_rust::level::compress_into(
+            src,
+            &mut ours,
+            lz4_in_rust::level::Level::new(level).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            &ours[..n],
+            &theirs[..],
+            "{what}: our level {level} block ({} bytes) differs from C's ({} bytes)",
+            n,
+            theirs.len()
+        );
+    }
+
     /// Both implementations must emit the same bytes.
     fn block_bytes_match_c(&self, src: &[u8], what: &str) {
         std::fs::write(&self.raw, src).unwrap();
@@ -276,6 +305,10 @@ fn run_case(fx: &Fixture, kind: Kind, len: usize, seed: u64) {
     fx.c_decodes_our_block(&src, 7, &what);
     fx.we_decode_c_block(&src, "0", &what);
     fx.we_decode_c_block(&src, "9", &what);
+    // high compression: level 3 (fewest probes), 6 (middle), 9 (pattern analysis)
+    for level in [3u8, 6, 9] {
+        fx.hc_bytes_match_c(&src, level, &what);
+    }
 
     // a frame at the smallest block size (many blocks) and the largest (one block)
     let small = FrameOpts {

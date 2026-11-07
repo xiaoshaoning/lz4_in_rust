@@ -460,37 +460,38 @@ fn read_extension(src: &[u8], ip: &mut usize) -> Result<usize, Error> {
 // ---------------------------------------------------------------- encoder helpers
 
 /// Write cursor into the destination block. `at` stays within `compress_bound`,
-/// which [`compress_into`] checks once on entry — see the module docs.
-struct Out<'a> {
-    buf: &'a mut [u8],
-    at: usize,
+/// which the encoder checks once on entry — see the module docs. Shared with
+/// [`crate::hc`], which writes the same format and has the same guarantee.
+pub(crate) struct Out<'a> {
+    pub(crate) buf: &'a mut [u8],
+    pub(crate) at: usize,
 }
 
 impl Out<'_> {
     #[inline]
-    fn put(&mut self, b: u8) {
+    pub(crate) fn put(&mut self, b: u8) {
         self.buf[self.at] = b;
         self.at += 1;
     }
 
     #[inline]
-    fn set(&mut self, at: usize, b: u8) {
+    pub(crate) fn set(&mut self, at: usize, b: u8) {
         self.buf[at] = b;
     }
 
     #[inline]
-    fn put_slice(&mut self, s: &[u8]) {
+    pub(crate) fn put_slice(&mut self, s: &[u8]) {
         self.buf[self.at..self.at + s.len()].copy_from_slice(s);
         self.at += s.len();
     }
 
     #[inline]
-    fn put_u16_le(&mut self, v: u16) {
+    pub(crate) fn put_u16_le(&mut self, v: u16) {
         self.put_slice(&v.to_le_bytes());
     }
 
     /// A length nibble is saturated at 15; emit what exceeds it as 255-runs.
-    fn put_length(&mut self, mut len: usize) {
+    pub(crate) fn put_length(&mut self, mut len: usize) {
         if len < RUN_MASK {
             return;
         }
@@ -542,7 +543,7 @@ fn hash<const BY_U16: bool>(src: &[u8], at: usize) -> u32 {
 
 /// Length of the match at `ip`/`match_at`, stopping at `limit` (`lib/lz4.c: LZ4_count`).
 #[inline]
-fn count_match(src: &[u8], mut at: usize, mut other: usize, limit: usize) -> usize {
+pub(crate) fn count_match(src: &[u8], mut at: usize, mut other: usize, limit: usize) -> usize {
     debug_assert!(other <= at, "match must start before the current position");
     let start = at;
     while at + 8 <= limit {

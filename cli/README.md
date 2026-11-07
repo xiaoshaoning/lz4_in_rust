@@ -14,7 +14,7 @@ it lives in its own crate and carries its own `COPYING`. The library at the repo
 cargo build --release -p lz4r          # target/release/lz4r
 lz4r file.txt                          # -> file.txt.lz4
 lz4r -d file.txt.lz4                   # -> file.txt
-lz4r -9 -B7 -T0 file.txt               # level 9, 4 MiB blocks, auto worker count
+lz4r -9 -B7 -T0 file.txt               # level 9 (high compression), 4 MiB blocks, auto workers
 lz4r -c file.txt | lz4 -d              # pipes, and interop with the reference tool
 lz4r -t file.txt.lz4                   # integrity check only
 ```
@@ -31,8 +31,9 @@ prints the full list. A file holding several concatenated frames is decoded in f
   `Read`/`Write` adapter (M4c).
 - No `-m`/`--multiple` (directories), no `--list`, no `-b` (benchmark), no legacy `-l`
   format, no dictionaries.
-- `-9..-12` are accepted but the high-compression parser is not ported yet, so they report
-  the gap instead of silently compressing at level 1.
+- `-2` and `-10..-12` are accepted but those parsers are not ported yet (`lz4mid` and the
+  optimal parser), so they report the gap instead of silently compressing at another level.
+  `-3..-9` work and are byte-identical to the reference.
 
 ## Tests
 

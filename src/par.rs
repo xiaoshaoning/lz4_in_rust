@@ -780,8 +780,9 @@ mod tests {
         assert_eq!(got, Err(Sink::Stop(2)));
 
         // and a codec error (a level that is not ported yet) converts into the caller's type
+        // level 2 (lz4mid) is still unported, so it stands in for "the gap reports itself"
         let hi = Opts {
-            level: Level::new(9).unwrap(),
+            level: Level::new(2).unwrap(),
             ..opts(Workers::Fixed(2), 4096)
         };
         assert!(matches!(
@@ -805,8 +806,9 @@ mod tests {
         }
         assert_eq!(ours, expected, "level 1 must be the C default parser");
 
+        // level 2 (lz4mid) is still unported, so it stands in for "the gap reports itself"
         let hi = Opts {
-            level: Level::new(9).unwrap(),
+            level: Level::new(2).unwrap(),
             ..opts(Workers::Fixed(2), 4096)
         };
         assert!(matches!(

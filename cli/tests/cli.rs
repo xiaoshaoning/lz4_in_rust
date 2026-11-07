@@ -266,8 +266,22 @@ fn the_reference_tool_accepts_ours_and_we_accept_theirs() {
     let data = corpus(120_000);
     case.write("in.txt", &data);
 
-    // ours -> theirs
-    assert!(case.run(&["in.txt", "ours.lz4"]).ok);
+    // ours -> theirs, and byte-identical when the level and block size agree
+    for level in ["-1", "-3", "-9"] {
+        assert!(case.run(&["-f", level, "in.txt", "ours.lz4"]).ok);
+        let out = Command::new(lz4)
+            .args([level, "-T1", "-f", "in.txt", "theirs.lz4"])
+            .current_dir(&case.dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "lz4 {level} failed");
+        assert_eq!(
+            case.read("ours.lz4"),
+            case.read("theirs.lz4"),
+            "{level}: our frame is not byte-identical to lz4's"
+        );
+    }
+
     let out = Command::new(lz4)
         .args(["-d", "-c", "ours.lz4"])
         .current_dir(&case.dir)

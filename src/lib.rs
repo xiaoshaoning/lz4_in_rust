@@ -13,7 +13,7 @@
 //! | [`block`]    | LZ4 block             | `lib/lz4.c`      | done  |
 //! | [`level`]    | `-1..-12` → parser    | `lib/lz4frame.c` | done (2..12 → HC, not ported) |
 //! | [`par`]      | independent blocks    | — (new)          | done  |
-//! | `hc`         | LZ4 block, high ratio | `lib/lz4hc.c`    | next  |
+//! | [`hc`]       | LZ4 block, high ratio | `lib/lz4hc.c`    | levels 3..=9; 2 and 10..=12 next |
 //! | [`frame`]    | LZ4 frame + XXH32     | `lib/lz4frame.c` | done (whole-frame, no dictionary) |
 //!
 //! Compatibility is the contract: `lz4 -d` must read what we produce, and every block
@@ -24,6 +24,7 @@
 
 pub mod block;
 pub mod frame;
+pub mod hc;
 pub mod level;
 pub mod par;
 pub mod xxhash;

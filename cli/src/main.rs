@@ -327,7 +327,14 @@ fn run(cmd: &Cmd) -> Result<(), String> {
             Ok(())
         }
         Mode::Compress => {
-            let packed = frame::compress(&data, &cmd.opts).map_err(|e| e.to_string())?;
+            let opts = frame::Opts {
+                // The reference tool shrinks the block size to the smallest one that holds
+                // the whole input (LZ4F_optimalBSID): a 15 KiB file gets 64 KiB blocks even
+                // with -B7. Same ratio, less memory, and the frames stay comparable.
+                block_size: optimal_block_size(cmd.opts.block_size, data.len()),
+                ..cmd.opts
+            };
+            let packed = frame::compress(&data, &opts).map_err(|e| e.to_string())?;
             if cmd.verbose {
                 eprintln!(
                     "{}: {} -> {} bytes ({:.1}%)",
@@ -364,6 +371,19 @@ fn decompress_all(data: &[u8]) -> Result<Vec<u8>, String> {
         return Err("no LZ4 frame found".to_string());
     }
     Ok(out)
+}
+
+/// `LZ4F_optimalBSID`: the smallest 64 KiB..4 MiB block that still holds `src_len`, never
+/// larger than what the caller asked for.
+fn optimal_block_size(requested: usize, src_len: usize) -> usize {
+    let mut block = 64 << 10;
+    while block < requested {
+        if src_len <= block {
+            return block;
+        }
+        block <<= 2;
+    }
+    requested
 }
 
 fn describe_input(cmd: &Cmd) -> String {
@@ -547,6 +567,17 @@ mod tests {
         assert!(parse_str(&["-B3", "f"]).is_err(), "block size id 3");
         assert!(parse_str(&["-T", "f"]).is_err(), "-T without a number");
         assert!(parse_str(&["a", "b", "c"]).is_err(), "three files");
+    }
+
+    #[test]
+    fn block_size_shrinks_to_fit_the_input() {
+        assert_eq!(optimal_block_size(4 << 20, 15_000), 64 << 10);
+        assert_eq!(optimal_block_size(4 << 20, 64 << 10), 64 << 10);
+        assert_eq!(optimal_block_size(4 << 20, (64 << 10) + 1), 256 << 10);
+        assert_eq!(optimal_block_size(4 << 20, 3 << 20), 4 << 20);
+        assert_eq!(optimal_block_size(4 << 20, 100 << 20), 4 << 20);
+        // an explicit smaller request is never enlarged
+        assert_eq!(optimal_block_size(64 << 10, 100 << 20), 64 << 10);
     }
 
     #[test]

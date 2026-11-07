@@ -164,8 +164,14 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 
 ### 里程碑（详见 `DESIGN.md` §6）
 
-- [ ] **M3 `hc`（levels 2..=12）**：hash chain 贪心（2..9）+ optimal parser（10..12）。
-  R1 已把入口留好：实现 `hc::compress_into` 后只需在 `level::compress_into` 里接上。
+- [x] **M3a `hc` 3..=9**（`src/hc.rs`）：hash chain 插入/搜索、`_Search2`/`_Search3` 两段前瞻、
+  `OPTIMAL_ML` 截断、level 9 的 pattern analysis（`countPattern`/`reverseCountPattern`/
+  `patternSegment`）。验收：committed fixture `text-l9.lz4`/`numbers-l9.lz4` 逐字节相同，
+  差分 fuzz 在 6 种数据形状 × 12 个边界长度 × 等级 {3,6,9} 上逐字节相同（三个 seed 复核）。
+  **踩到的坑**（都写进了提交信息）：C 的 `encodeSequence` 通过指针把 `ip`/`anchor` 一起推进，
+  第一版只推进了 `ip`，于是"跳过 1–2 字节"的路径把字面量吞掉，输出环环错位、
+  最终 `anchor > ip` panic；把签名改成 `&mut ip, &mut anchor` 后与 C 同构。
+- [ ] **M3b `hc` 2（`lz4mid`）与 10..=12（optimal parser + 价格表）**
 - [ ] **M4b `frame`**：header/FLG/BD/HC(XXH32)、block header、block/content checksum、
   linked/independent、64 KiB–4 MiB 块、skippable frame；编码器直接消费 `par::compress_each`。
 - [x] **M5 CLI**（`cli/`，独立 crate，**GPL-2.0-or-later** + 自己的 `COPYING`）：
