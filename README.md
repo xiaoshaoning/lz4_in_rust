@@ -15,8 +15,9 @@ shape with explicit index invariants instead (see `docs/DESIGN.md` §2). Speed i
 assumed: on match-heavy data the safe decoder runs at 0.6–0.7x of C, on long-match data it
 beats C (memmove instead of an 8-byte wildcopy).
 
-**`0.0.x` is a pre-release.** It covers the block codec, the parallel engine and the frame
-format; high-compression levels and the `lz4` command line are what `0.1.0` waits for.
+**`0.0.x` is a pre-release.** It covers the block codec, the parallel engine, the frame
+format and a working command line tool; high-compression levels (`-2..-12`) are what `0.1.0`
+waits for.
 Until then the API may change between `0.0.x` releases. The frame layer is whole-buffer
 (no `Read`/`Write` adapter yet), has no dictionary support, and a *linked* frame it writes
 does not actually link blocks — see `docs/REVIEW.md`.
@@ -32,13 +33,31 @@ does not actually link blocks — see `docs/REVIEW.md`.
 | `par` | parallel block engine + adaptive worker policy; `compress_each` streams blocks in order | — (new) | ✅ output independent of thread count |
 | `frame` | LZ4 frame format: descriptor, blocks, both checksums, linked + independent, skippable frames | `lib/lz4frame.c` | ✅ our frames are byte-identical to C's and `lz4 -d` reads them |
 | `hc` | high compression, levels 2–12 | `lib/lz4hc.c` | ⬜ next |
-| CLI | `lz4`-compatible command line | `programs/` | ⬜ planned (GPL-2.0-or-later, unlike the rest) |
+| `cli/` (`lz4r`) | command line tool: files, pipes, `-1..-12`, `-B#`, `-T#` | `programs/` | ✅ **GPL-2.0-or-later** (separate crate) |
+
+## Command line
+
+`cargo build --release -p lz4r` gives `lz4r`, a `.lz4` tool that interoperates with the
+reference `lz4` in both directions:
+
+```sh
+lz4r file.txt              # -> file.txt.lz4
+lz4r -d file.txt.lz4       # -> file.txt
+lz4r -9 -B7 -T0 file.txt   # level 9, 4 MiB blocks, auto threads
+lz4r -c file.txt | lz4 -d  # pipes
+lz4r -t file.txt.lz4       # integrity check
+```
+
+It is a **separate crate under GPL-2.0-or-later**, because it is a port of upstream
+`programs/`; the library stays BSD-2-Clause. It reads the whole input into memory for now
+(see `cli/README.md`).
 
 ## Where to read
 
 | file | what it is |
 |---|---|
 | `docs/DESIGN.md` | **start here**: the decisions, the safety argument, the porting traps, the measurements, the roadmap |
+| `cli/README.md` | the command line tool: flags, what it does not do yet, its tests |
 | `docs/REVIEW.md` | the code review and its plan checklist: what was fixed, what is left, and how each item is verified |
 | `tests/interop.rs` | what "compatible" means here, executable |
 | `tools/c_oracle.c` | the C reference wrapped for diff-testing (build, unblock, bench, xxh32) |
@@ -46,7 +65,7 @@ does not actually link blocks — see `docs/REVIEW.md`.
 ## Build and check
 
 ```sh
-cargo test                                   # 51 tests, no C toolchain needed (fixtures are committed)
+cargo test --workspace                       # 69 tests, no C toolchain needed (fixtures are committed)
 cargo test --release                         # same, and much faster on the big roundtrips
 cargo clippy --all-targets && cargo fmt --check
 ```

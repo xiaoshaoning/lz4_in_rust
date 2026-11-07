@@ -22,13 +22,13 @@ jobs:
         run: cargo fmt --check
 
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: docs (broken intra-doc links are errors)
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
       - name: tests (fixtures are committed, no C toolchain needed)
-        run: cargo test --release
+        run: cargo test --release --workspace
 
       - name: differential tests against the C reference
         run: |
@@ -40,7 +40,8 @@ jobs:
           # the whole suite: with the oracle in place the env-gated differential tests in
           # both tests/interop.rs and tests/frame_interop.rs run instead of skipping
           # 150 extra random cases on top of the fixed grid; a failure prints its seed
-          LZ4_C_ORACLE=target/c-oracle LZ4_FUZZ_ROUNDS=150 cargo test --release -- --nocapture
+          LZ4_C_ORACLE=target/c-oracle LZ4_FUZZ_ROUNDS=150 \
+            cargo test --release --workspace -- --nocapture
 
       # the fixtures are only worth what the pinned upstream produces for them
       - name: the pinned C version still reproduces our fixture digests
@@ -65,7 +66,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: tests
-        run: cargo test --release
+        run: cargo test --release --workspace
 
       - name: differential tests against the C reference
         run: |
@@ -75,4 +76,5 @@ jobs:
           mkdir -p target
           cc -O2 -I/tmp/lz4/lib -o target/c-oracle.exe tools/c_oracle.c \
              /tmp/lz4/lib/lz4.c /tmp/lz4/lib/lz4hc.c /tmp/lz4/lib/xxhash.c /tmp/lz4/lib/lz4frame.c
-          LZ4_C_ORACLE=target/c-oracle.exe LZ4_FUZZ_ROUNDS=80 cargo test --release -- --nocapture
+          LZ4_C_ORACLE=target/c-oracle.exe LZ4_FUZZ_ROUNDS=80 \
+            cargo test --release --workspace -- --nocapture

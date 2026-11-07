@@ -1,0 +1,19 @@
+[package]
+name = "lz4r"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+description = "A command line tool for LZ4 (.lz4 files), ported from the reference `lz4` tool"
+# Derived from upstream programs/ (lz4cli.c, lz4io.c), which is GPL-2.0-or-later,
+# unlike the library crate at the repository root (BSD-2-Clause). See COPYING.
+license = "GPL-2.0-or-later"
+readme = "README.md"
+repository = "https://github.com/xiaoshaoning/lz4_in_rust"
+publish = false
+
+[dependencies]
+lz4_in_rust = { path = ".." }
+
+[[bin]]
+name = "lz4r"
+path = "src/main.rs"

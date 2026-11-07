@@ -19,9 +19,10 @@ This repository mirrors the dual-license model of upstream LZ4:
   of, or derived from, the upstream `lib/` directory, and is distributed under the
   BSD 2-Clause license reproduced below;
 
-- if the command line tool (`programs/` upstream) is ported here in the future,
-  that part — being derived from GPL-2.0-or-later code — will carry the
-  GPL-2.0-or-later license instead, in its own directory with its own notice.
+- `cli/` is the port of upstream `programs/` (the `lz4` command line tool), which
+  upstream distributes under GPL-2.0-or-later. It is therefore a separate crate
+  under GPL-2.0-or-later, with its own `cli/COPYING`. The library crate does not
+  depend on it, and nothing in `src/` is derived from GPL code.
 
 The BSD 2-Clause license was chosen by upstream for `lib/` precisely because it is
 meant to be embedded in third-party applications; that is what this port is for.

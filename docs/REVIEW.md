@@ -153,8 +153,12 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
   R1 已把入口留好：实现 `hc::compress_into` 后只需在 `level::compress_into` 里接上。
 - [ ] **M4b `frame`**：header/FLG/BD/HC(XXH32)、block header、block/content checksum、
   linked/independent、64 KiB–4 MiB 块、skippable frame；编码器直接消费 `par::compress_each`。
-- [ ] **M5 CLI**：`-1..-12 -d -c -t -B# -BD -T# --single-thread --list …`（GPL-2.0-or-later，
-  与上游 `programs/` 一致，独立目录 + `COPYING`）。
+- [x] **M5 CLI**（`cli/`，独立 crate，**GPL-2.0-or-later** + 自己的 `COPYING`）：
+  `-1..-12 -d -z -c -t -f -q -v -B4..-B7 -BD -BX --no-frame-crc --content-size
+  -T# --single-thread --rm -h -V`、bundled 短选项（`-9f`、`-B4D`）、`-` 作 stdin/stdout、
+  多帧文件全解、原子写出（`.tmp` + rename）、`--rm` 仅在成功后删源。
+  尚未做：`-m/--multiple`、`--list`、`-b`、legacy `-l`、字典；整文件读入内存（等 M4c 的
+  `Read`/`Write` 适配层）。
 
 ---
 

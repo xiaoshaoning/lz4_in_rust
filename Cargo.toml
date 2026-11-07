@@ -11,4 +11,8 @@ keywords = ["lz4", "compression", "compress", "no-unsafe"]
 categories = ["compression"]
 exclude = ["/target", "/tools", "/.github"]
 
+[workspace]
+members = ["cli"]
+resolver = "2"
+
 [dependencies]
