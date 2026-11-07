@@ -39,6 +39,19 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 | F14 | 没有任何"任意字节都不 panic"的测试；F13 正是这类测试能抓到的 | 测试缺口 | 新增 `arbitrary_bytes_never_panic`：0/1/4/7/15/40/200/1000 字节的随机输入各 64 组，外加对合法帧做 500 次随机单比特破坏 |
 | F15 | `frame::Opts` 同时装着格式偏好和 `par` 的旋钮（`level`/`workers`/`memory_budget`），文档没说为什么 | 读者要在两处猜"这块该谁管" | 文档写明：frame 是"格式 + 块编解码"的组合点，所以两者在这里汇合；`par::Opts` 由这里构造，避免它的 block size 与帧的块大小打架 |
 
+第四轮评审（`examples/`、`tools/` 全部、`.github/workflows/ci.yml` —— 此前从未跑过，因为仓库还没有 remote）：
+
+| # | 问题 | 红标 | 处置 |
+|---|---|---|---|
+| F16 | **CI 文件根本无法解析**：`- name: tests (no C toolchain needed: fixtures are committed)` 里那个 `: ` 让 YAML 在 `name` 值中途看到键值分隔符。第一次 push 就会红 | 从不被执行的配置 = 未知的未知 | 名称去掉冒号；并**用 PyYAML 实际解析过**才提交 |
+| F17 | **CI 的 oracle 编译漏了 `liblz4frame.c`** —— 加了 `frame`/`unframe` 子命令后没同步 CI（只更新了 `build_oracle.sh`），链接会失败 | 同一件事两处描述，改一处漏一处 | 两个平台都补上 |
+| F18 | **frame 差分测试在 CI 里从没跑过**：差分步骤只跑 `cargo test --test interop`，而 `tests/frame_interop.rs` 需要 `LZ4_C_ORACLE`，没设就静默 skip | 静默跳过的门 = 没有门 | 差分步骤改为设 `LZ4_C_ORACLE` 跑**整个 suite**，两个测试文件都会真跑 |
+| F19 | CI 的"oracle 与我们的 fixture 一致"这一步只是**打印**摘要，没有比较 | 检查不检查 | 改成与钉住值 `5663fe8f` 比较，并额外用 C 解 `frame/text-1.lz4` 与原始字节 `cmp` |
+| F20 | oracle 的 `frame` 子命令用 `LZ4F_compressBound` + **只调用一次** `LZ4F_compressEnd`。一旦 `autoFlush=1`，footer 放不下，`compressEnd` 只写一部分——悄悄产出 9 字节的**畸形"空帧"fixture** | 流式 API 的返回值被当成"写完" | 改用 `LZ4F_compressFrameBound`，并按文档循环 `compressEnd` 直到返回 0；13 个 frame fixture 重新生成后与提交版本**逐字节相同** |
+| F21 | fixture 的字节依赖 liblz4 的内部缓冲（`autoFlush` 没设），上游换缓冲大小就会静默改变 fixture | 未钉住的输入 | 显式 `autoFlush = 1`（F20 就是它暴露出来的） |
+| F22 | `examples/parallel_probe.rs` 报的是**平均值**（总时间/轮数），而 `DESIGN.md` §5 写的方法论是"取最小"；这台机器上两者差到 2 倍。而且它只测了收集型 `compress`，`frame` 实际用的是 `compress_each` | 工具与文档不一致，测的不是发布路径 | 改成逐轮取最小；新增一行 `compress_each (Auto, streaming)` 的结果 |
+| F23 | `build_oracle.sh` 头部没说清哪些 fixture 是**提交的输入**、哪些是生成的（`random.raw`、`frame/large.raw` 不可复现） | 文档缺失 | 头部写明 |
+
 第三轮**只记录、不修**的小问题（工具/性能，不影响正确性）：
 
 - `tools/c_oracle.c` 的 `unframe` 在错误路径上没调 `LZ4F_freeDecompressionContext`（工具里的

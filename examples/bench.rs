@@ -5,9 +5,9 @@
 //! lz4 -b1 <file>          # same machine, same data, block-mode benchmark
 //! ```
 //!
-//! Not a microbenchmark harness: it reports the best of a few passes, which is enough
-//! to catch a port that is 3x off; the minimum (not the mean) is reported, because
-//! min is the stable statistic on a machine with variable clocks.
+//! Not a microbenchmark harness: 30 passes, minimum reported, which is enough to catch a
+//! port that is 3x off. The minimum is the stable statistic on a machine whose clock
+//! drifts by up to 3x; a mean would just measure the fan.
 
 use std::time::Instant;
 

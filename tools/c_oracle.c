@@ -103,9 +103,11 @@ int main(int argc, char** argv)
         prefs.frameInfo.blockChecksumFlag = atoi(argv[5]) ? LZ4F_blockChecksumEnabled : LZ4F_noBlockChecksum;
         prefs.frameInfo.contentChecksumFlag = atoi(argv[6]) ? LZ4F_contentChecksumEnabled : LZ4F_noContentChecksum;
         prefs.frameInfo.contentSize = (unsigned long long)0;
+        prefs.autoFlush = 1;   /* fixtures must not depend on liblz4's internal buffering */
         src = slurp(argv[8], &srcSize);
         if (atoi(argv[7])) prefs.frameInfo.contentSize = (unsigned long long)srcSize;
-        cap = LZ4F_compressBound(srcSize, &prefs);
+        /* the whole-frame bound, not the update bound: it includes the footer */
+        cap = LZ4F_compressFrameBound(srcSize, &prefs);
         dst = (unsigned char*)malloc(cap);
         if (!dst) { return 2; }
         if (LZ4F_isError(LZ4F_createCompressionContext(&cctx, LZ4F_VERSION))) { return 1; }
@@ -129,6 +131,7 @@ int main(int argc, char** argv)
         size_t pos = 0, len = 0, cap, hint = 1;
         char* out;
         src = slurp(argv[2], &srcSize);
+        /* First guess only: the loop below grows it, so a frame may expand 100x. */
         cap = srcSize * 4 + 65536;
         out = (char*)malloc(cap);
         if (!out) { return 2; }

@@ -27,7 +27,7 @@ jobs:
       - name: docs (broken intra-doc links are errors)
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
-      - name: tests (no C toolchain needed: fixtures are committed)
+      - name: tests (fixtures are committed, no C toolchain needed)
         run: cargo test --release
 
       - name: differential tests against the C reference
@@ -36,12 +36,17 @@ jobs:
           git clone --quiet "$LZ4_REPO" /tmp/lz4
           git -C /tmp/lz4 checkout --quiet "$LZ4_COMMIT"
           cc -O2 -I/tmp/lz4/lib -o target/c-oracle tools/c_oracle.c \
-             /tmp/lz4/lib/lz4.c /tmp/lz4/lib/lz4hc.c /tmp/lz4/lib/xxhash.c
-          LZ4_C_ORACLE=target/c-oracle cargo test --release --test interop -- --nocapture
+             /tmp/lz4/lib/lz4.c /tmp/lz4/lib/lz4hc.c /tmp/lz4/lib/xxhash.c /tmp/lz4/lib/lz4frame.c
+          # the whole suite: with the oracle in place the env-gated differential tests in
+          # both tests/interop.rs and tests/frame_interop.rs run instead of skipping
+          LZ4_C_ORACLE=target/c-oracle cargo test --release -- --nocapture
 
-      - name: the oracle itself must agree with our fixtures
+      # the fixtures are only worth what the pinned upstream produces for them
+      - name: the pinned C version still reproduces our fixture digests
         run: |
-          target/c-oracle xxh32 tests/fixtures/text.raw
+          test "$(target/c-oracle xxh32 tests/fixtures/text.raw)" = "5663fe8f"
+          target/c-oracle unframe tests/fixtures/frame/text-1.lz4 /tmp/back.raw
+          cmp /tmp/back.raw tests/fixtures/text.raw
 
   windows:
     runs-on: windows-latest
@@ -68,5 +73,5 @@ jobs:
           git -C /tmp/lz4 checkout --quiet "$LZ4_COMMIT"
           mkdir -p target
           cc -O2 -I/tmp/lz4/lib -o target/c-oracle.exe tools/c_oracle.c \
-             /tmp/lz4/lib/lz4.c /tmp/lz4/lib/lz4hc.c /tmp/lz4/lib/xxhash.c
-          LZ4_C_ORACLE=target/c-oracle.exe cargo test --release --test interop -- --nocapture
+             /tmp/lz4/lib/lz4.c /tmp/lz4/lib/lz4hc.c /tmp/lz4/lib/xxhash.c /tmp/lz4/lib/lz4frame.c
+          LZ4_C_ORACLE=target/c-oracle.exe cargo test --release -- --nocapture

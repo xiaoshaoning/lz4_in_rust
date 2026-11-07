@@ -5,6 +5,10 @@
 #
 # Default C repo: ../lz4 (D:\Projects\github\lz4). Output: target/c-oracle,
 # fixtures: tests/fixtures/*.lz4 + *.raw  (committed, so `cargo test` needs no C toolchain).
+#
+# Generated here: the block fixtures, the frame fixtures, and the text/numbers/zeros/empty/one
+# payloads. Committed and *not* regenerated (because they cannot be reproduced): random.raw
+# (/dev/urandom) and frame/large.raw — both are inputs, and tests pin their digests.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 crepo=${1:-$(cd "$here/../lz4" && pwd)}
