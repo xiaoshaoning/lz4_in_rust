@@ -124,7 +124,7 @@ offset 16..32 用 2×16 字节、8..16 用 4×8 字节（每次读的源都已�
 | `frame` | ⬜ M4 |
 | CLI | ⬜ M5 |
 
-测试：`cargo test` 12 个测试，其中 6 个是**与 C 的差分**（不需要 C 工具链，语料已提交在
+测试：`cargo test` 53 个测试。核心是与 C 的**差分**：固定语料（不需要 C 工具链，语料已提交在
 `tests/fixtures/`；`LZ4_C_ORACLE=target/c-oracle.exe cargo test` 还会跑"C 解我们的输出"）。
 
 ---

@@ -46,7 +46,7 @@ does not actually link blocks — see `docs/REVIEW.md`.
 ## Build and check
 
 ```sh
-cargo test                                   # 49 tests, no C toolchain needed (fixtures are committed)
+cargo test                                   # 51 tests, no C toolchain needed (fixtures are committed)
 cargo test --release                         # same, and much faster on the big roundtrips
 cargo clippy --all-targets && cargo fmt --check
 ```
@@ -60,8 +60,16 @@ tools/build_oracle.sh /path/to/c-lz4       # or, on Windows:
 gcc -O2 -I/path/to/c-lz4/lib -o target/c-oracle tools/c_oracle.c \
     /path/to/c-lz4/lib/{lz4,lz4hc,xxhash}.c
 
-LZ4_C_ORACLE=target/c-oracle cargo test --test interop
+LZ4_C_ORACLE=target/c-oracle cargo test
+LZ4_C_ORACLE=target/c-oracle LZ4_FUZZ_ROUNDS=150 cargo test --release   # and fuzz it
 ```
+
+`LZ4_FUZZ_ROUNDS` adds random cases to the differential sweep
+(`tests/fuzz_diff.rs`): every data shape (one long run, short cycles, text, noise, mixed,
+random runs) at every boundary size (12, 13, 64 KiB, the 64 KiB table switch, ...), each
+checked four ways — our block bytes are identical to C's, C decodes our block and our
+frame, and we decode C's block (fast *and* high-compression) and frame. A failure prints
+its seed and case, so it reproduces with `LZ4_FUZZ_SEED=...`.
 
 ## Measuring
 
@@ -85,6 +93,7 @@ drifts by up to 3x between runs, so absolute numbers alone are not comparable. E
 - **Roundtrip sweep** — sizes 0..600 plus the sizes around the decoder's fast/slow boundary,
   with repeats that exercise every match-offset bucket.
 - **Thread invariance** — `Single`, `Fixed(1,2,3,8)` and `Auto` must produce identical blocks.
+- **Differential fuzz** — the sweep described above, over generated data rather than fixtures.
 
 ## License
 

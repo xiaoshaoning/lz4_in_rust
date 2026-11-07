@@ -134,9 +134,13 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 
 - [ ] **E1 Miri**：`rustup toolchain install nightly && cargo +nightly miri test`。
   零 `unsafe` 下主要抓 std 层的别名/UB 误用，便宜保险。
-- [ ] **E2 随机差分 fuzz**：现在只有 10 个固定 fixture + 单块全截断/全比特翻转。
-  补一个"随机长度/随机分布 → 我们压 → C 解 → 比字节"和反方向的批量循环（`tools/fuzz_diff.sh`，
-  用已编译的 `c-oracle`，CI 里跑几百轮）。
+- [x] **E2 随机差分 fuzz**（`tests/fuzz_diff.rs`）：6 种数据形状（单字节重复 / 短周期 /
+  文本 / 噪声 / 文本夹随机字节 / 随机长游程）× 12 个边界长度（0、1、4、12、13、64、4096、
+  65535、**65547**（byU16 表切换）、65548、100k、300k）的固定网格，加 `LZ4_FUZZ_ROUNDS=n`
+  个随机用例。每个用例四判：块字节与 C **相同**、C 能解我们的块、我们解 C 的块（fast 0 级
+  与 HC 9 级）、frame 双向（64 KiB / 4 MiB、独立块 / linked、带 checksum 与 content size）。
+  失败会打印 seed 与用例（`LZ4_FUZZ_SEED=` 复现）。实测：72 个固定用例 + 三个不同 seed 各
+  60 轮全绿；CI 里 Linux 跑 150 轮、Windows 80 轮。
 - [ ] **E3 平台覆盖**：`i686`（32 位）、大端（全程 `from_le_bytes`，理论安全但未验证）、
   >4 GiB 输入与多帧拼接。
 - [ ] **E4 `rust-version = 1.75` 未实测**（只在 1.94 编过）。CI 加一个 `cargo +1.75 check`。
