@@ -31,7 +31,7 @@ does not actually link blocks — see `docs/REVIEW.md`.
 | `block::compress_into` | LZ4 block encoder (fast tier, `acceleration`) | `lib/lz4.c` | ✅ **byte-identical** to C |
 | `level` | `-1..-12` → parser, in one place | `lib/lz4frame.c` | ✅ level 1; 2–12 report the gap |
 | `par` | parallel block engine + adaptive worker policy; `compress_each` streams blocks in order | — (new) | ✅ output independent of thread count |
-| `frame` | LZ4 frame format: descriptor, blocks, both checksums, linked + independent, skippable frames | `lib/lz4frame.c` | ✅ our frames are byte-identical to C's and `lz4 -d` reads them |
+| `frame` | LZ4 frame format: descriptor, blocks, both checksums, linked + independent, skippable frames; **streaming** via `Read`/`Write` | `lib/lz4frame.c` | ✅ our frames are byte-identical to C's and `lz4 -d` reads them |
 | `hc` | high compression: `lz4mid` (2), hash chain (3–9), optimal parser (10–12) | `lib/lz4hc.c` | ✅ byte-identical to C at every level |
 | `cli/` (`lz4r`) | command line tool: files, pipes, `-1..-12`, `-B#`, `-T#` | `programs/` | ✅ **GPL-2.0-or-later** (separate crate) |
 
@@ -49,8 +49,8 @@ lz4r -t file.txt.lz4       # integrity check
 ```
 
 It is a **separate crate under GPL-2.0-or-later**, because it is a port of upstream
-`programs/`; the library stays BSD-2-Clause. It reads the whole input into memory for now
-(see `cli/README.md`).
+`programs/`; the library stays BSD-2-Clause. It streams: memory stays bounded by one batch
+of blocks, so file size is not a constraint.
 
 ## Where to read
 

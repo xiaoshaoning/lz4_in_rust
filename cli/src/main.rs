@@ -13,7 +13,7 @@
 //! (the library's frame layer is whole-buffer so far), so it is not for multi-gigabyte
 //! files yet. Files and pipes both work up to the size of the machine's memory.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -316,61 +316,83 @@ fn check_terminals(cmd: &Cmd, stdin_is_tty: bool, stdout_is_tty: bool) -> Result
 
 fn run(cmd: &Cmd) -> Result<(), String> {
     check_terminals(cmd, io::stdin().is_terminal(), io::stdout().is_terminal())?;
-    let data = read_input(cmd)?;
-
     match cmd.mode {
-        Mode::Test => {
-            let decoded = decompress_all(&data)?;
-            if !cmd.quiet {
-                println!("{}: {} bytes, ok", describe_input(cmd), decoded.len());
+        Mode::Compress => compress_stream(cmd),
+        Mode::Decompress => {
+            let mut out = open_output(cmd)?;
+            let written = decode_into(cmd, &mut out)?;
+            out.commit()?;
+            if cmd.verbose {
+                eprintln!("{}: {written} bytes decompressed", describe_input(cmd));
             }
+            remove_source(cmd);
             Ok(())
         }
-        Mode::Compress => {
-            let opts = frame::Opts {
-                // The reference tool shrinks the block size to the smallest one that holds
-                // the whole input (LZ4F_optimalBSID): a 15 KiB file gets 64 KiB blocks even
-                // with -B7. Same ratio, less memory, and the frames stay comparable.
-                block_size: optimal_block_size(cmd.opts.block_size, data.len()),
-                ..cmd.opts
-            };
-            let packed = frame::compress(&data, &opts).map_err(|e| e.to_string())?;
-            if cmd.verbose {
-                eprintln!(
-                    "{}: {} -> {} bytes ({:.1}%)",
-                    describe_input(cmd),
-                    data.len(),
-                    packed.len(),
-                    100.0 * packed.len() as f64 / data.len().max(1) as f64
-                );
+        Mode::Test => {
+            let written = decode_into(cmd, &mut io::sink())?;
+            if !cmd.quiet {
+                println!("{}: {written} bytes, ok", describe_input(cmd));
             }
-            write_output(cmd, &packed)
-        }
-        Mode::Decompress => {
-            let decoded = decompress_all(&data)?;
-            write_output(cmd, &decoded)
+            Ok(())
         }
     }
 }
 
-/// A file may hold several concatenated frames (`lz4 -m` produces those); decode all.
-fn decompress_all(data: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    let mut pos = 0usize;
-    let mut frames = 0usize;
-    while pos < data.len() {
-        let decoded = frame::decompress(&data[pos..]).map_err(|e| format!("{e}"))?;
-        out.extend_from_slice(&decoded.content);
-        if decoded.consumed == 0 {
-            return Err("decoder made no progress".to_string());
+/// The input size when it can be known (a regular file), which is what `--content-size`
+/// needs and what lets the block size shrink to fit.
+fn declared_len(cmd: &Cmd) -> Option<u64> {
+    let path = cmd.input.as_ref()?;
+    if path.as_os_str() == "-" {
+        return None;
+    }
+    let meta = fs::metadata(path).ok()?;
+    meta.is_file().then_some(meta.len())
+}
+
+/// Compress the input into a frame, one batch of blocks at a time.
+fn compress_stream(cmd: &Cmd) -> Result<(), String> {
+    let len = declared_len(cmd);
+    // The reference tool shrinks the block size to the smallest one that holds the whole
+    // input (LZ4F_optimalBSID): a 15 KiB file gets 64 KiB blocks even with -B7. Same ratio,
+    // less memory, and the frames stay comparable.
+    let block_size = match len {
+        Some(len) => optimal_block_size(cmd.opts.block_size, len as usize),
+        None => cmd.opts.block_size,
+    };
+    let opts = frame::Opts {
+        block_size,
+        ..cmd.opts
+    };
+
+    let mut input = open_input(cmd)?;
+    let mut out = open_output(cmd)?;
+    let mut enc =
+        frame::Encoder::new(io::BufWriter::new(&mut out), &opts, len).map_err(|e| e.to_string())?;
+    io::copy(&mut input, &mut enc).map_err(|e| format!("{}: {e}", describe_input(cmd)))?;
+    // a Writer has no end-of-stream call: the end mark is explicit
+    let mut buffered = enc.finish().map_err(|e| e.to_string())?;
+    buffered.flush().map_err(|e| e.to_string())?;
+    drop(buffered);
+    out.commit()?;
+    remove_source(cmd);
+    Ok(())
+}
+
+/// Decode every frame in the input into `out`, returning the bytes written.
+fn decode_into(cmd: &Cmd, out: &mut dyn Write) -> Result<u64, String> {
+    let mut input = open_input(cmd)?;
+    let mut dec = frame::Decoder::new(io::BufReader::new(&mut input));
+    let written = io::copy(&mut dec, out).map_err(|e| {
+        // prefer the codec's wording when the failure came from the frame layer
+        match dec.last_error() {
+            Some(codec) => format!("{}: {codec}", describe_input(cmd)),
+            None => format!("{}: {e}", describe_input(cmd)),
         }
-        pos += decoded.consumed;
-        frames += 1;
+    })?;
+    if dec.info().is_none() {
+        return Err(format!("{}: not an LZ4 frame", describe_input(cmd)));
     }
-    if frames == 0 {
-        return Err("no LZ4 frame found".to_string());
-    }
-    Ok(out)
+    Ok(written)
 }
 
 /// `LZ4F_optimalBSID`: the smallest 64 KiB..4 MiB block that still holds `src_len`, never
@@ -393,39 +415,32 @@ fn describe_input(cmd: &Cmd) -> String {
     }
 }
 
-fn read_input(cmd: &Cmd) -> Result<Vec<u8>, String> {
+fn open_input(cmd: &Cmd) -> Result<Box<dyn Read>, String> {
     match &cmd.input {
-        None => {
-            let mut buf = Vec::new();
-            io::stdin()
-                .lock()
-                .read_to_end(&mut buf)
-                .map_err(|e| format!("reading stdin: {e}"))?;
-            Ok(buf)
+        Some(path) if path.as_os_str() != "-" => {
+            let f = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            Ok(Box::new(f))
         }
-        Some(path) if path.as_os_str() == "-" => {
-            let mut buf = Vec::new();
-            io::stdin()
-                .lock()
-                .read_to_end(&mut buf)
-                .map_err(|e| format!("reading stdin: {e}"))?;
-            Ok(buf)
-        }
-        Some(path) => fs::read(path).map_err(|e| format!("{}: {e}", path.display())),
+        _ => Ok(Box::new(io::stdin())),
     }
 }
 
-fn write_output(cmd: &Cmd, bytes: &[u8]) -> Result<(), String> {
+/// Where the result goes. A file is written to `<name>.tmp` and renamed into place, so a
+/// crash never leaves half an output file; `commit` is what makes it visible.
+enum Output {
+    Stdout(io::Stdout),
+    File {
+        file: fs::File,
+        tmp: PathBuf,
+        path: PathBuf,
+    },
+}
+
+fn open_output(cmd: &Cmd) -> Result<Output, String> {
     let to_stdout = cmd.to_stdout || cmd.output.as_deref().map_or(true, |p| p.as_os_str() == "-");
     if to_stdout {
-        io::stdout()
-            .lock()
-            .write_all(bytes)
-            .and_then(|()| io::stdout().flush())
-            .map_err(|e| format!("writing stdout: {e}"))?;
-        return finish(cmd);
+        return Ok(Output::Stdout(io::stdout()));
     }
-
     let path = cmd.output.as_ref().expect("output path");
     if path.exists() && !cmd.force {
         return Err(format!(
@@ -433,27 +448,57 @@ fn write_output(cmd: &Cmd, bytes: &[u8]) -> Result<(), String> {
             path.display()
         ));
     }
-    // write next to the destination, then rename: a crash never leaves half a file
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    fs::write(&tmp, bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("{}: {e}", path.display())
-    })?;
-    finish(cmd)
+    let file = fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    Ok(Output::File {
+        file,
+        tmp,
+        path: path.clone(),
+    })
 }
 
-fn finish(cmd: &Cmd) -> Result<(), String> {
-    if cmd.remove_source {
-        if let Some(input) = &cmd.input {
-            if input.as_os_str() != OsStr::new("-") && input.exists() {
-                fs::remove_file(input).map_err(|e| format!("{}: {e}", input.display()))?;
+impl Output {
+    fn commit(self) -> Result<(), String> {
+        match self {
+            Output::Stdout(mut stdout) => stdout.flush().map_err(|e| format!("stdout: {e}")),
+            Output::File { file, tmp, path } => {
+                drop(file);
+                fs::rename(&tmp, &path).map_err(|e| {
+                    let _ = fs::remove_file(&tmp);
+                    format!("{}: {e}", path.display())
+                })
             }
         }
     }
-    Ok(())
+}
+
+impl Write for Output {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Output::Stdout(s) => s.write(buf),
+            Output::File { file, .. } => file.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Output::Stdout(s) => s.flush(),
+            Output::File { file, .. } => file.flush(),
+        }
+    }
+}
+
+fn remove_source(cmd: &Cmd) {
+    if !cmd.remove_source {
+        return;
+    }
+    if let Some(input) = &cmd.input {
+        if input.as_os_str() != "-" {
+            let _ = fs::remove_file(input);
+        }
+    }
 }
 
 #[cfg(test)]

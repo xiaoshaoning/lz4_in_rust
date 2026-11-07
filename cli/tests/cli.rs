@@ -239,6 +239,27 @@ fn remove_source_only_after_success() {
     );
 }
 
+/// The tool streams: a file many blocks long must roundtrip, and so must a pipe, without
+/// the process ever needing the whole content in one buffer (the point of M4c).
+#[test]
+fn large_file_and_pipe_stream_through() {
+    let case = Case::new("streaming");
+    let data = corpus(8 << 20); // 8 MiB, 128 blocks at -B4
+    case.write("big.txt", &data);
+
+    assert!(case.run(&["-B4", "big.txt", "big.lz4"]).ok);
+    assert!(case.read("big.lz4").len() < data.len());
+    assert!(case.run(&["-d", "-f", "big.lz4", "back.txt"]).ok);
+    assert_eq!(case.read("back.txt"), data);
+
+    // the same through pipes, where no length is known up front
+    let packed = case.run_with_stdin(&["-B4", "-c"], Some(&data));
+    assert!(packed.ok, "{}", packed.stderr);
+    let back = case.run_with_stdin(&["-d", "-c"], Some(&packed.stdout));
+    assert!(back.ok, "{}", back.stderr);
+    assert_eq!(back.stdout, data);
+}
+
 #[test]
 fn usage_errors_are_reported() {
     let case = Case::new("usage");

@@ -24,11 +24,11 @@ Supported: `-1..-12`, `-d`, `-z`, `-c`, `-t`, `-f`, `-q`, `-v`, `-B4..-B7`, `-BD
 `--rm`, `-h`, `-V`, `-` for stdin/stdout, and bundled short flags (`-9f`, `-B4D`). `lz4r -h`
 prints the full list. A file holding several concatenated frames is decoded in full.
 
+Memory stays bounded (one batch of blocks) for both directions: files of any size and pipes
+both work, and `--content-size` is refused on a stream whose length cannot be known.
+
 ## What it does not do yet
 
-- **Reads the whole input into memory.** The library's frame layer is whole-buffer, so this
-  is not for multi-gigabyte files. Compression of a stream with bounded memory needs the
-  `Read`/`Write` adapter (M4c).
 - No `-m`/`--multiple` (directories), no `--list`, no `-b` (benchmark), no legacy `-l`
   format, no dictionaries.
 - Every level `-1..-12` works and is byte-identical to the reference tool, including its
