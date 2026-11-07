@@ -226,14 +226,30 @@ fn next_match_at<const BY_U16: bool>(
 // to 31 bytes past a run's logical end is safe: output is produced front to back and
 // matches only read behind `op`. Measured and rejected alternatives: docs/DESIGN.md §2.
 pub fn decompress_into(src: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
-    decompress_impl(src, dst)
+    decompress_impl(src, dst, 0)
 }
 
-fn decompress_impl(src: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
+/// [`decompress_into`] writing at `op_start`, with the bytes before it kept as history.
+///
+/// This is what a *linked* frame needs: block N may reference up to 64 KiB that was
+/// decoded before it, so the caller decodes every block into one buffer at its own offset.
+/// `offset > op` is still rejected, so a match can reach back into the history but never
+/// before the start of the buffer. Returns the end position (`op_start + decoded length`).
+pub fn decompress_into_at(src: &[u8], dst: &mut [u8], op_start: usize) -> Result<usize, Error> {
+    if op_start > dst.len() {
+        return Err(Error::OutputTooSmall {
+            need: op_start,
+            have: dst.len(),
+        });
+    }
+    decompress_impl(src, dst, op_start)
+}
+
+fn decompress_impl(src: &[u8], dst: &mut [u8], op_start: usize) -> Result<usize, Error> {
     let src_len = src.len();
     let dst_len = dst.len();
     let mut ip = 0usize;
-    let mut op = 0usize;
+    let mut op = op_start;
 
     loop {
         // ---- fast loop ------------------------------------------------

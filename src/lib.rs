@@ -14,7 +14,7 @@
 //! | [`level`]    | `-1..-12` → parser    | `lib/lz4frame.c` | done (2..12 → HC, not ported) |
 //! | [`par`]      | independent blocks    | — (new)          | done  |
 //! | `hc`         | LZ4 block, high ratio | `lib/lz4hc.c`    | next  |
-//! | `frame`      | LZ4 frame + XXH32     | `lib/lz4frame.c` | next  |
+//! | [`frame`]    | LZ4 frame + XXH32     | `lib/lz4frame.c` | done (whole-frame, no dictionary) |
 //!
 //! Compatibility is the contract: `lz4 -d` must read what we produce, and every block
 //! `lz4` produces must decode here. `tests/` checks both directions against fixtures
@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod block;
+pub mod frame;
 pub mod level;
 pub mod par;
 pub mod xxhash;
@@ -49,6 +50,8 @@ pub enum Error {
     InputTooLarge(usize),
     /// `xxh32` digest in the data does not match the data.
     ChecksumMismatch { expected: u32, actual: u32 },
+    /// The frame header or block structure is malformed; the reason names the field.
+    InvalidFrame(&'static str),
     /// Syntactically valid data using a feature this port does not implement.
     Unsupported(&'static str),
 }
@@ -74,6 +77,7 @@ impl core::fmt::Display for Error {
                     "checksum mismatch: expected {expected:08x}, got {actual:08x}"
                 )
             }
+            Error::InvalidFrame(what) => write!(f, "invalid frame: {what}"),
             Error::Unsupported(what) => write!(f, "unsupported feature: {what}"),
         }
     }

@@ -119,6 +119,7 @@ offset 16..32 用 2×16 字节、8..16 用 4×8 字节（每次读的源都已�
 | `block::compress_into` | ✅ 逐字节等于 C（level 0 / acceleration 任意） |
 | `level` | ✅ `-1..-12` → 解析器的唯一映射（`src/level.rs`，4 个单测） |
 | `par`（并行块引擎 + 自适应线程数） | ✅ `plan`/`Control` 纯函数 + 池 + 按序流式交付；15 个单测 |
+| `frame`（整帧、无字典、无 Read/Write 适配层） | ✅ `src/frame.rs`；13 个单测 + 5 个与 C 的差分测试 |
 | `hc`（2..=12） | ⬜ M3 |
 | `frame` | ⬜ M4 |
 | CLI | ⬜ M5 |
@@ -162,7 +163,8 @@ offset 16..32 用 2×16 字节、8..16 用 4×8 字节（每次读的源都已�
 | M2 ✅ | `block::compress_into` + `compress_bound` | 与 C **逐字节相同**；C 能解我们的输出 |
 | M3 | `hc` 2..=9（hash chain + 贪心），再做 10..=12（optimal parser + 价格表） | `-9`/`-12` 输出与 C 逐字节相同；`-2` 起进 HC（`LZ4HC_CLEVEL_MIN = 2`） |
 | M4a ✅ | `par`：并行块引擎 + 策略（`plan` / `Control` / 池） | 输出与线程数无关；小主机/小块/小输入自动单线程；见 §9 |
-| M4b | `frame`：header/flags/block size/XXH32/多块/linked block/`--content-size`，复用 `par` | `lz4`/`lz4 -d` 双向互通，输出与 C 逐字节相同 |
+| M4b ✅ | `frame`：descriptor/blocks/两个 checksum/linked+independent/skippable，复用 `par::compress_each` | 我们的帧与 C **逐字节相同**；C 能解我们的帧；linked 多块帧能解（含跨块引用） |
+| M4c | `frame` 收尾：`Read`/`Write` 适配层、字典（`createCDict` 语义）、多帧遍历辅助、已知 content size 时的并行解压 | 能用流处理管道/文件，内存与块大小无关 |
 | M5 | CLI：`-1..-12`、`-d`、`-c`、`-t`、`-B#`、`--list` | 能替代日常 `lz4`；`lz4 -t` 通过 |
 
 ---

@@ -3,6 +3,9 @@
  *
  *   c_oracle block <level> <in> <out>   raw LZ4 block (level<=0 -> LZ4_compress_default)
  *   c_oracle unblock <in> <out> <size>  decode a raw block into exactly <size> bytes
+ *   c_oracle frame <level> <blockid> <linked> <blockcrc> <contentcrc> <contentsize> <in> <out>
+ *                                       one whole frame, prefs chosen explicitly
+ *   c_oracle unframe <in> <out>         decode a frame with LZ4F_decompress
  *   c_oracle bench <in>                 block compress/decompress throughput, best of 5
  *   c_oracle xxh32 <in>                 XXH32 of the whole file, seed 0
  *   c_oracle xxh32stream <in>           same, fed in irregular chunks (streaming state)
@@ -13,6 +16,7 @@
 #include <time.h>
 
 #include "lz4.h"
+#include "lz4frame.h"
 #include "lz4hc.h"
 #define XXH_STATIC_LINKING_ONLY   /* XXH32_state_t is opaque otherwise */
 #include "xxhash.h"
@@ -82,6 +86,78 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    if (argc == 10 && strcmp(argv[1], "frame") == 0) {
+        /* The streaming API, like the lz4 command line: it honours the requested block
+         * size and block mode. (LZ4F_compressFrame, the single-shot API, silently shrinks
+         * the block size to the input and forces independent blocks when there is only
+         * one block of them — useless for producing test coverage.) */
+        LZ4F_preferences_t prefs = LZ4F_INIT_PREFERENCES;
+        LZ4F_cctx* cctx = NULL;
+        LZ4F_compressOptions_t options;
+        memset(&options, 0, sizeof(options));
+        size_t cap, pos = 0, done;
+        unsigned char* dst;
+        prefs.compressionLevel = atoi(argv[2]);
+        prefs.frameInfo.blockSizeID = (LZ4F_blockSizeID_t)atoi(argv[3]);
+        prefs.frameInfo.blockMode = atoi(argv[4]) ? LZ4F_blockLinked : LZ4F_blockIndependent;
+        prefs.frameInfo.blockChecksumFlag = atoi(argv[5]) ? LZ4F_blockChecksumEnabled : LZ4F_noBlockChecksum;
+        prefs.frameInfo.contentChecksumFlag = atoi(argv[6]) ? LZ4F_contentChecksumEnabled : LZ4F_noContentChecksum;
+        prefs.frameInfo.contentSize = (unsigned long long)0;
+        src = slurp(argv[8], &srcSize);
+        if (atoi(argv[7])) prefs.frameInfo.contentSize = (unsigned long long)srcSize;
+        cap = LZ4F_compressBound(srcSize, &prefs);
+        dst = (unsigned char*)malloc(cap);
+        if (!dst) { return 2; }
+        if (LZ4F_isError(LZ4F_createCompressionContext(&cctx, LZ4F_VERSION))) { return 1; }
+        done = LZ4F_compressBegin(cctx, dst, cap, &prefs);
+        if (LZ4F_isError(done)) { fprintf(stderr, "begin: %s\n", LZ4F_getErrorName(done)); return 1; }
+        pos = done;
+        done = LZ4F_compressUpdate(cctx, dst + pos, cap - pos, src, srcSize, &options);
+        if (LZ4F_isError(done)) { fprintf(stderr, "update: %s\n", LZ4F_getErrorName(done)); return 1; }
+        pos += done;
+        done = LZ4F_compressEnd(cctx, dst + pos, cap - pos, &options);
+        if (LZ4F_isError(done)) { fprintf(stderr, "end: %s\n", LZ4F_getErrorName(done)); return 1; }
+        pos += done;
+        LZ4F_freeCompressionContext(cctx);
+        spit(argv[9], dst, pos);
+        free(dst); free(src);
+        return 0;
+    }
+
+    if (argc == 4 && strcmp(argv[1], "unframe") == 0) {
+        LZ4F_dctx* dctx = NULL;
+        size_t pos = 0, len = 0, cap, hint = 1;
+        char* out;
+        src = slurp(argv[2], &srcSize);
+        cap = srcSize * 4 + 65536;
+        out = (char*)malloc(cap);
+        if (!out) { return 2; }
+        if (LZ4F_isError(LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION))) { return 1; }
+        while (hint != 0) {
+            size_t dstSize = cap - len;
+            size_t inSize = srcSize - pos;
+            size_t const r = LZ4F_decompress(dctx, out + len, &dstSize, src + pos, &inSize, NULL);
+            if (LZ4F_isError(r)) {
+                fprintf(stderr, "unframe: %s\n", LZ4F_getErrorName(r));
+                return 1;
+            }
+            len += dstSize; pos += inSize; hint = r;
+            if (cap - len < 65536) {
+                cap *= 2;
+                out = (char*)realloc(out, cap);
+                if (!out) { return 2; }
+            }
+            if (inSize == 0 && dstSize == 0 && hint != 0) {
+                fprintf(stderr, "unframe: truncated input\n");
+                return 1;
+            }
+        }
+        LZ4F_freeDecompressionContext(dctx);
+        spit(argv[3], out, len);
+        free(out); free(src);
+        return 0;
+    }
+
     if (argc == 3 && strcmp(argv[1], "bench") == 0) {
         int bound, csize = 0, i, dsize;
         double bestC = 1e9, bestD = 1e9;
@@ -145,6 +221,6 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    fprintf(stderr, "usage: c_oracle block|xxh32|xxh32stream ...\n");
+    fprintf(stderr, "usage: c_oracle block|unblock|frame|unframe|bench|xxh32|xxh32stream ...\n");
     return 2;
 }

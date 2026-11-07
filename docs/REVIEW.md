@@ -55,7 +55,9 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
   不挂死；同时验证 codec 错误能转进调用者的错误类型）。
   **实测**：改造后吞吐不变（32 MB、4 MB 块、8 worker：压缩 4.0–4.5x、解压 3.0–3.9x）。
 
-- [ ] **R3 `Error::Unsupported(&'static str)` 会成为 frame 的垃圾桶**
+- [x] **R3 错误分类**：frame 落地时新增了 `Error::InvalidFrame(&'static str)`（描述符/结构字段
+  非法，字符串只说明是哪个字段），`Unsupported` 只留给"本移植还没做"（HC、字典、未知块大小）。
+  下一步若变体继续膨胀，再拆成命名变体（如 `ReservedBits`），字符串保持"消息"角色。
   （保留位、未知 block size、legacy 帧都会往里塞字符串）。
   **修法**：定调"*种类*用命名变体，字符串只做消息"。frame 落地时新增
   `ReservedBits`, `UnsupportedBlockSize(u8)`, `LegacyFrame` 等；`Unsupported` 保留给真正的
@@ -90,6 +92,11 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
   **验收**：连续处理 N 个文件后，第二个文件的起步 worker 数等于第一个文件测到的最优；
   以及"降了之后负载恢复，能自己加回去"。
   **时机**：frame 编码器出现时（它才是"跨调用"存在的地方）。
+
+- [ ] **R8 frame 的三个已知缺口**（M4c，见 `DESIGN.md` §6）
+  ① `Read`/`Write` 适配层（现在整帧在内存里）；② 字典（frame 声明 dictID 时明确报错，而不是解错）；
+  ③ 写 *linked* 帧时其实没有跨块引用（block 层还没有字典），比值等同 independent——帧合法、
+  `lz4` 能解，但没有吃到 linked 的收益；④ 有 content size 时解压可以并行（块边界已知），现在串行。
 
 ### 工程与测试
 

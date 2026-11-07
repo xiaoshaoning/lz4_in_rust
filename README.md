@@ -15,10 +15,11 @@ shape with explicit index invariants instead (see `docs/DESIGN.md` §2). Speed i
 assumed: on match-heavy data the safe decoder runs at 0.6–0.7x of C, on long-match data it
 beats C (memmove instead of an 8-byte wildcopy).
 
-**`0.0.x` is a pre-release.** It covers the block codec and the parallel engine; the frame
-format (`.lz4` files), high-compression levels and the `lz4` command line are what `0.1.0`
-waits for. Until then the API may change between `0.0.x` releases, and nothing here reads or
-writes a `.lz4` file yet.
+**`0.0.x` is a pre-release.** It covers the block codec, the parallel engine and the frame
+format; high-compression levels and the `lz4` command line are what `0.1.0` waits for.
+Until then the API may change between `0.0.x` releases. The frame layer is whole-buffer
+(no `Read`/`Write` adapter yet), has no dictionary support, and a *linked* frame it writes
+does not actually link blocks — see `docs/REVIEW.md`.
 
 ## Status
 
@@ -29,8 +30,8 @@ writes a `.lz4` file yet.
 | `block::compress_into` | LZ4 block encoder (fast tier, `acceleration`) | `lib/lz4.c` | ✅ **byte-identical** to C |
 | `level` | `-1..-12` → parser, in one place | `lib/lz4frame.c` | ✅ level 1; 2–12 report the gap |
 | `par` | parallel block engine + adaptive worker policy; `compress_each` streams blocks in order | — (new) | ✅ output independent of thread count |
+| `frame` | LZ4 frame format: descriptor, blocks, both checksums, linked + independent, skippable frames | `lib/lz4frame.c` | ✅ our frames are byte-identical to C's and `lz4 -d` reads them |
 | `hc` | high compression, levels 2–12 | `lib/lz4hc.c` | ⬜ next |
-| `frame` | LZ4 frame format (header, blocks, XXH32, linked blocks) | `lib/lz4frame.c` | ⬜ planned |
 | CLI | `lz4`-compatible command line | `programs/` | ⬜ planned (GPL-2.0-or-later, unlike the rest) |
 
 ## Where to read
@@ -45,7 +46,7 @@ writes a `.lz4` file yet.
 ## Build and check
 
 ```sh
-cargo test                                   # 34 tests, no C toolchain needed (fixtures are committed)
+cargo test                                   # 49 tests, no C toolchain needed (fixtures are committed)
 cargo test --release                         # same, and much faster on the big roundtrips
 cargo clippy --all-targets && cargo fmt --check
 ```
