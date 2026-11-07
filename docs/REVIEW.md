@@ -67,6 +67,19 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 - `cli/` **不会**被打进根 crate 的发布包（`cargo package --list` 里 0 个 `cli/` 条目），Cargo 自动排除 workspace 成员——所以不需要额外 `exclude`。
 - 端到端测试用的 `target/cli-tests/<name>` 目录天然隔离（每个测试一个子目录），并行跑不打架。
 
+第六轮评审（`src/hc.rs`，M3a 落地之后）：
+
+| # | 问题 | 红标 | 处置 |
+|---|---|---|---|
+| F24 | **`countBack` 的 4 字节快路径是死代码**：循环条件写反（`floor + back < -2`，C 是 `back + floor > 3`），所以每次计数都走逐字节循环。修好条件后立刻暴露第二个 bug：C 的 `LZ4HC_NbCommonBytes32` 在小端机上是 **`clz >> 3`**（数的是紧邻当前位置的高位字节），我用了 `ctz`，于是匹配长度算错、roundtrip 直接失败。逐字节版本一直掩盖着它 | 死代码掩盖错误；"看起来等价"的位运算方向错误 | 条件改成 `back + floor > 3`；取 `leading_zeros()` 并注明为什么不是 trailing；`cargo test`（debug）+ 差分 fuzz 双证 |
+| F25 | 候选预检里 `matchPtr - lookBack` 会 **usize 下溢**（debug 下 panic，release 下回绕）：C 在这里读的是缓冲区之前的内存，本来就没有定义 | 潜在 panic（违反"任何输入不 panic"） | 显式 `near >= look_back` 判定，不可读时视为"预检不确定"、交给后面的 4 字节比较决定；注释写明 C 在此越界读 |
+| F26 | `pattern_segment` 每个候选**调用两次**（`.is_some()` 之后 `.unwrap()`），level 9 热路径成本翻倍 | Repetition（同一个决定做两次） | 一次 `if let Some(...)` |
+| F27 | `hc::compress_into` 把越界等级**夹到 9**，即"悄悄按另一个等级压"——正是 `level.rs` 明令禁止的行为 | 掩盖错误 | 越界直接返回 `Error::Unsupported`（调用方必须自己路由） |
+| F28 | `NB_SEARCHES` 有 10 项但只有 3..=9 可达（前四项属于 `lz4mid`） | 死数据 + 索引与等级的关系不明显 | 7 项，按 `level - LEVEL_MIN` 索引，注释说明 |
+| F29 | `best.len.max(1)` 恒等；C 里的 `assert(matchLength >= MINMATCH)` / `assert(longest >= 1)` 没有对应断言 | 无效防护 + 缺失不变式 | 删掉 max(1)；补两个 `debug_assert!` |
+
+同时把**有意缺省的三个 C 分支**写进模块文档：外字典（`dictCtx`/`usingExtDict`）、`fillOutput`（`destSize`）、`favorDecSpeed`（frame 层选项）——它们的缺失是决定，不是遗漏。
+
 第三轮**只记录、不修**的小问题（工具/性能，不影响正确性）：
 
 - `tools/c_oracle.c` 的 `unframe` 在错误路径上没调 `LZ4F_freeDecompressionContext`（工具里的

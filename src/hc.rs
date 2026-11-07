@@ -15,6 +15,12 @@
 //! - the truncation rules of the lookahead (`OPTIMAL_ML`, the `+3` and `< 3` conditions);
 //! - `encodeSequence`'s token/length layout.
 //!
+//! Three C branches are absent because the features they serve are not ported: external
+//! dictionaries (`dictCtx`/`usingExtDict`), the `fillOutput` directive (`destSize`), and
+//! `favorDecSpeed` (a frame-layer option). Their absence is deliberate, not an oversight:
+//! the driver passes the same "no dictionary, not limited" arguments the C does, and those
+//! branches are then unreachable.
+//!
 //! Not here yet: level 2 (`lz4mid`, a different strategy) and levels 10..=12 (the optimal
 //! parser). [`crate::level`] reports those as unsupported rather than compressing wrongly.
 
@@ -40,8 +46,9 @@ const RUN_MASK: usize = 15;
 /// Levels 3..=9: the hash-chain strategy. Level 2 is `lz4mid`, 10..=12 the optimal parser.
 pub const LEVEL_MIN: u8 = 3;
 pub const LEVEL_MAX: u8 = 9;
-/// Probes per position and the coincidence threshold, per level (`k_clTable`).
-const NB_SEARCHES: [u32; 10] = [4, 4, 4, 4, 8, 16, 32, 64, 128, 256];
+/// Probes per position, for levels 3..=9 (`k_clTable`; its first four entries are the
+/// `lz4mid` levels this module does not handle, so the table starts at level 3).
+const NB_SEARCHES: [u32; 7] = [4, 8, 16, 32, 64, 128, 256];
 /// Level 9 and above analyse repeated patterns (`maxNbAttempts > 128` in the C).
 const PATTERN_ANALYSIS_FROM: u32 = 128;
 
@@ -136,14 +143,19 @@ fn read8(src: &[u8], at: usize) -> u64 {
 /// `LZ4HC_countBack`: how many bytes match before `ip`/`m`, bounded by the two floors.
 /// Returns a non-positive value, like the C, because call sites add it to positions.
 fn count_back(src: &[u8], ip: usize, m: usize, i_min: usize, m_min: usize) -> isize {
-    let floor = (ip - i_min).min(m - m_min) as isize; // ≤ 0 when negated
+    let floor = (ip - i_min).min(m - m_min) as isize; // how far back the walk may go
     let mut back = 0isize;
-    while floor + back < -3 + 1 {
+    // `(back - min) > 3` in the C, where its `min` is our -floor: four bytes at a time
+    while back + floor > 3 {
         let at = (ip as isize + back - 4) as usize;
         let other = (m as isize + back - 4) as usize;
         let v = read4(src, at) ^ read4(src, other);
         if v != 0 {
-            return back + (v.trailing_zeros() as isize / 8);
+            // `back - LZ4HC_NbCommonBytes32(v)`, which on a little-endian host is
+            // `clz(v) >> 3`: the matching bytes *adjacent to the current position* are the
+            // high-address ones (an `ip - 4 .. ip` window), so it is leading zeros here,
+            // not trailing.
+            return back - (v.leading_zeros() as isize / 8);
         }
         back -= 4;
     }
@@ -271,13 +283,21 @@ fn wider_match(
         attempts -= 1;
         debug_assert!(match_index < ip_index);
         let match_at = (match_index - PREFIX_IDX) as usize;
-        let probe = best.len.max(1) as usize; // the C asserts longest >= 1 here
+        // `LZ4_read16(iLowLimit + longest - 1) == LZ4_read16(matchPtr - lookBack + longest - 1)`:
+        // a cheap filter that rejects most candidates with two bytes instead of a match
+        // count. The reference reads before its buffer start when lookBack exceeds the
+        // candidate position; there is no such slack here, so an unavailable read means
+        // "inconclusive" and the 4-byte test below decides.
+        debug_assert!(best.len >= 1);
+        let probe = best.len as usize;
+        let near = match_at + probe - 1;
         let pre = if can_read2(src, i_low_limit + probe - 1)
-            && can_read2(src, match_at + probe - 1 - look_back)
+            && near >= look_back
+            && can_read2(src, near - look_back)
         {
-            read2(src, i_low_limit + probe - 1) == read2(src, match_at + probe - 1 - look_back)
+            read2(src, i_low_limit + probe - 1) == read2(src, near - look_back)
         } else {
-            true // cannot compare cheaply; the 4-byte test below decides
+            true
         };
         if pre && read4(src, match_at) == pattern {
             let back = if look_back > 0 {
@@ -309,13 +329,18 @@ fn wider_match(
                     src_pattern_length = count_pattern(src, ip + 4, i_high_limit, pattern) + 4;
                 }
             }
-            let segment_found = repeat_confirmed
-                && candidate >= lowest
-                && protect_dict_end(PREFIX_IDX, candidate)
-                && pattern_segment(src, candidate, pattern, i_high_limit, lowest).is_some();
-            if segment_found {
-                let (forward, back) =
-                    pattern_segment(src, candidate, pattern, i_high_limit, lowest).unwrap();
+            if repeat_confirmed && candidate >= lowest && protect_dict_end(PREFIX_IDX, candidate) {
+                let Some((forward, back)) =
+                    pattern_segment(src, candidate, pattern, i_high_limit, lowest)
+                else {
+                    // not a run of this motif after all: fall through to the chain walk
+                    let step = chain.delta(match_index);
+                    if step > match_index {
+                        break;
+                    }
+                    match_index -= step;
+                    continue;
+                };
                 let segment = back + forward;
                 let full_pattern_fits =
                     segment >= src_pattern_length && forward <= src_pattern_length;
@@ -392,6 +417,7 @@ fn encode_sequence(out: &mut Out, src: &[u8], ip: &mut usize, anchor: &mut usize
     out.put_slice(literals);
     out.put_u16_le(m.off as u16);
 
+    debug_assert!(m.len >= MIN_MATCH as isize, "encode_sequence needs a match");
     let mut code = m.len as usize - MIN_MATCH;
     if code >= ML_MASK {
         out.put_length(code);
@@ -425,8 +451,12 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
             have: dst.len(),
         });
     }
-    let level = level.clamp(LEVEL_MIN, LEVEL_MAX);
-    let attempts = NB_SEARCHES[level as usize];
+    if !(LEVEL_MIN..=LEVEL_MAX).contains(&level) {
+        return Err(Error::Unsupported(
+            "hc::compress_into handles levels 3..=9; the caller must route the others",
+        ));
+    }
+    let attempts = NB_SEARCHES[(level - LEVEL_MIN) as usize];
     let pattern_analysis = attempts > PATTERN_ANALYSIS_FROM;
 
     let mut out = Out { buf: dst, at: 0 };
