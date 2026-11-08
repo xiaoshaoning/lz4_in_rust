@@ -15,12 +15,12 @@ shape with explicit index invariants instead (see `docs/DESIGN.md` §2). Speed i
 assumed: on match-heavy data the safe decoder runs at 0.6–0.7x of C, on long-match data it
 beats C (memmove instead of an 8-byte wildcopy).
 
-**`0.0.x` is a pre-release.** It covers the block codec, the parallel engine, the frame
-format and a working command line tool; high-compression levels (`-2..-12`) are what `0.1.0`
-waits for.
-Until then the API may change between `0.0.x` releases. The frame layer is whole-buffer
-(no `Read`/`Write` adapter yet), has no dictionary support, and a *linked* frame it writes
-does not actually link blocks — see `docs/REVIEW.md`.
+**`0.1.x`** covers the block codec, every high-compression level (`-2..-12`), the parallel
+engine, the frame format (whole-buffer *and* streaming) and a working command line tool, all
+byte-identical to the reference where the format allows it. Known gaps, all tracked in
+`docs/REVIEW.md`: encoding *with* a dictionary is not ported (decoding is), and a *linked*
+frame we write does not yet let its blocks reference each other, so its ratio equals
+independent blocks.
 
 ## Status
 

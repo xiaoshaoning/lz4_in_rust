@@ -16,6 +16,7 @@
 //! `&mut [u8]` slices from a `Mutex`-guarded stack.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
@@ -151,8 +152,6 @@ fn available_workers() -> usize {
 #[derive(Debug)]
 struct Control {
     k: usize,
-    k_lo: usize,
-    k_hi: usize,
     best: f64,
     cooldown: u32,
     window: usize,
@@ -164,8 +163,6 @@ impl Control {
     fn new(plan: Plan, workers: usize) -> Self {
         Control {
             k: workers,
-            k_lo: 1,
-            k_hi: workers,
             best: 0.0,
             cooldown: 0,
             // a window is deliberately large (>= 8 blocks, >= 8 MiB) so that one noisy
@@ -197,11 +194,27 @@ impl Control {
         if self.cooldown > 0 {
             self.cooldown -= 1; // quiet window: no adjustment, by design
         } else if now < self.best * 0.80 {
-            self.k = self.k.saturating_sub(1).max(self.k_lo);
+            self.k = self.k.saturating_sub(1).max(1);
             self.cooldown = 3;
         }
-        self.k.min(self.k_hi)
+        self.k
     }
+}
+
+/// The bytes job `i` covers: one `block_size`, clipped to the input.
+fn block_range(input_len: usize, i: usize, block_size: usize) -> Range<usize> {
+    let start = i * block_size;
+    start..(start + block_size).min(input_len)
+}
+
+/// Compress one block. Both the sequential path and the workers call this, so the
+/// allocate-compress-trim sequence and its worst-case bound live in one place.
+fn pack_block(src: &[u8], i: usize, block_size: usize, level: Level) -> Result<Vec<u8>, Error> {
+    let r = block_range(src.len(), i, block_size);
+    let mut buf = vec![0u8; block::compress_bound(r.len())];
+    let n = level::compress_into(&src[r], &mut buf, level)?;
+    buf.truncate(n);
+    Ok(buf)
 }
 
 /// Decode one block into the exact slot the layout assigned it.
@@ -263,22 +276,10 @@ where
     E: From<Error> + Send,
 {
     let plan = plan_with(opts, src.len(), avail);
-    let range = |i: usize| {
-        let start = i * plan.block_size;
-        let end = (start + plan.block_size).min(src.len());
-        start..end
-    };
-    let one = |i: usize| -> Result<Vec<u8>, Error> {
-        let r = range(i);
-        let mut buf = vec![0u8; block::compress_bound(r.len())];
-        let n = level::compress_into(&src[r], &mut buf, opts.level)?;
-        buf.truncate(n);
-        Ok(buf)
-    };
 
     if plan.workers <= 1 || plan.blocks <= 1 {
         for i in 0..plan.blocks {
-            sink(i, one(i)?)?;
+            sink(i, pack_block(src, i, plan.block_size, opts.level)?)?;
         }
         return Ok(());
     }
@@ -297,7 +298,6 @@ where
         for id in 0..plan.workers {
             let (cursor, cancel, control) = (&cursor, &cancel, &control);
             let (ready, announce) = (&ready, &announce);
-            let range = &range;
             handles.push(s.spawn(move || -> Result<(), E> {
                 let mut wake = WakeOnFailure {
                     cancel,
@@ -312,12 +312,9 @@ where
                     if i >= plan.blocks {
                         break; // the queue is empty
                     }
-                    let r = range(i);
-                    let raw_len = r.len();
+                    let raw_len = block_range(src.len(), i, plan.block_size).len();
                     let started = Instant::now();
-                    let mut buf = vec![0u8; block::compress_bound(raw_len)];
-                    let n = level::compress_into(&src[r], &mut buf, opts.level)?;
-                    buf.truncate(n);
+                    let buf = pack_block(src, i, plan.block_size, opts.level)?;
                     lock(ready).insert(i, buf);
                     announce.notify_all();
                     lock(control).report(raw_len, started.elapsed().as_secs_f64());

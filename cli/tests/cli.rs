@@ -37,6 +37,17 @@ impl Case {
         std::fs::read(self.path(name)).unwrap()
     }
 
+    /// Every file in the case directory whose name ends in `.tmp` — a successful *or* failed
+    /// run must leave none, whatever the temporary name looks like.
+    fn leftovers(&self) -> Vec<String> {
+        std::fs::read_dir(&self.dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect()
+    }
+
     /// Run the binary in this case's directory.
     fn run(&self, args: &[&str]) -> Output {
         self.run_with_stdin(args, None)
@@ -98,6 +109,23 @@ fn real_lz4() -> Option<&'static str> {
 }
 
 #[test]
+fn a_failed_decode_leaves_no_temporary_file() {
+    let case = Case::new("failed-decode");
+    // a valid magic and descriptor, then a truncated block: the write has already started
+    let mut bad = vec![0x04, 0x22, 0x4D, 0x18, 0x60, 0x40, 0x82];
+    bad.extend_from_slice(&[0x10, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00]);
+    case.write("bad.lz4", &bad);
+    let out = case.run(&["-d", "bad.lz4"]);
+    assert!(!out.ok, "a truncated frame must fail");
+    assert_eq!(
+        case.leftovers(),
+        Vec::<String>::new(),
+        "temp file left behind"
+    );
+    assert!(!case.path("bad").exists(), "no half-written output");
+}
+
+#[test]
 fn compress_then_decompress_through_files() {
     let case = Case::new("roundtrip");
     let data = corpus(200_000);
@@ -106,8 +134,9 @@ fn compress_then_decompress_through_files() {
     let out = case.run(&["in.txt"]);
     assert!(out.ok, "compress failed: {}", out.stderr);
     assert!(case.path("in.txt.lz4").exists());
-    assert!(
-        !case.path("in.txt.lz4.tmp").exists(),
+    assert_eq!(
+        case.leftovers(),
+        Vec::<String>::new(),
         "temp file left behind"
     );
 

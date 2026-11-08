@@ -9,9 +9,10 @@
 //! the format lives in `lz4_in_rust::frame`; everything about threads in
 //! `lz4_in_rust::par`; the `-1..-12` scale in `lz4_in_rust::level`.
 //!
-//! Difference from the reference worth knowing: this reads the whole input into memory
-//! (the library's frame layer is whole-buffer so far), so it is not for multi-gigabyte
-//! files yet. Files and pipes both work up to the size of the machine's memory.
+//! It streams in both directions: the frame layer's `Read`/`Write` adapters keep memory at
+//! one batch of blocks, so the input's size does not decide the memory it needs. Files and
+//! pipes are the same code path; `--content-size` is refused on a stream whose length cannot
+//! be known in advance (the descriptor would have to lie).
 
 use std::ffi::OsString;
 use std::fs;
@@ -218,32 +219,28 @@ fn parse(args: &[OsString]) -> Result<Action, String> {
                 // -B takes a block size id and may carry a modifier: -B4, -B4D, -B4X,
                 // or the modifier alone: -BD, -BX
                 'B' => {
-                    let modifier = |c: char, cmd: &mut Cmd| -> bool {
-                        match c {
-                            'D' => cmd.opts.block_mode = BlockMode::Linked,
-                            'X' => cmd.opts.block_checksum = true,
-                            _ => return false,
-                        }
-                        true
-                    };
+                    let mut understood = false;
+                    if let Some(id @ '4'..='7') = chars.peek().copied() {
+                        chars.next();
+                        // 4 -> 64 KiB, 5 -> 256 KiB, 6 -> 1 MiB, 7 -> 4 MiB
+                        cmd.opts.block_size = 1usize << (16 + 2 * (id as u8 - b'4') as usize);
+                        understood = true;
+                    }
                     match chars.peek().copied() {
-                        Some(id @ '4'..='7') => {
+                        Some('D') => {
                             chars.next();
-                            // 4 -> 64 KiB, 5 -> 256 KiB, 6 -> 1 MiB, 7 -> 4 MiB
-                            cmd.opts.block_size = 1usize << (16 + 2 * (id as u8 - b'4') as usize);
-                            if let Some(c) = chars.peek().copied() {
-                                if modifier(c, &mut cmd) {
-                                    chars.next();
-                                }
-                            }
+                            cmd.opts.block_mode = BlockMode::Linked;
+                            understood = true;
                         }
-                        Some(c) => {
-                            if !modifier(c, &mut cmd) {
-                                return Err("-B needs a block size (4..7), D or X".to_string());
-                            }
+                        Some('X') => {
                             chars.next();
+                            cmd.opts.block_checksum = true;
+                            understood = true;
                         }
-                        None => return Err("-B needs a block size (4..7), D or X".to_string()),
+                        _ => {}
+                    }
+                    if !understood {
+                        return Err("-B needs a block size (4..7), D or X".to_string());
                     }
                 }
                 'T' => {
@@ -268,10 +265,11 @@ fn parse(args: &[OsString]) -> Result<Action, String> {
     match files.len() {
         0 => {}
         1 => {
-            cmd.input = Some(files.remove(0));
+            let path = files.remove(0);
             if !cmd.to_stdout && cmd.mode != Mode::Test {
-                cmd.output = Some(default_output(&cmd.input.clone().unwrap(), cmd.mode)?);
+                cmd.output = Some(default_output(&path, cmd.mode)?);
             }
+            cmd.input = Some(path);
         }
         2 => {
             cmd.input = Some(files.remove(0));
@@ -306,6 +304,11 @@ fn default_output(input: &Path, mode: Mode) -> Result<PathBuf, String> {
 
 // ---------------------------------------------------------------- doing it
 
+/// Whether the result goes to stdout: `-c`, an output named `-`, or no output at all.
+fn writes_stdout(cmd: &Cmd) -> bool {
+    cmd.to_stdout || cmd.output.as_deref().map_or(true, |p| p.as_os_str() == "-")
+}
+
 /// The two console rules, as a pure function so they can be tested without a terminal:
 /// reading a file from a keyboard looks like a hang, and compressed bytes on a console
 /// are unreadable garbage (and can wedge some terminals).
@@ -313,9 +316,7 @@ fn check_terminals(cmd: &Cmd, stdin_is_tty: bool, stdout_is_tty: bool) -> Result
     if cmd.input.is_none() && stdin_is_tty && !cmd.force {
         return Err("no input given, and stdin is a terminal (see -h)".to_string());
     }
-    let writes_stdout =
-        cmd.to_stdout || cmd.output.as_deref().map_or(true, |p| p.as_os_str() == "-");
-    if writes_stdout && stdout_is_tty && cmd.mode == Mode::Compress && !cmd.force {
+    if writes_stdout(cmd) && stdout_is_tty && cmd.mode == Mode::Compress && !cmd.force {
         return Err(
             "refusing to write compressed data to a console; use -f or redirect".to_string(),
         );
@@ -459,8 +460,8 @@ fn open_input(cmd: &Cmd) -> Result<Box<dyn Read>, String> {
     }
 }
 
-/// Where the result goes. A file is written to `<name>.tmp` and renamed into place, so a
-/// crash never leaves half an output file; `commit` is what makes it visible.
+/// Where the result goes. A file is written beside its destination and renamed into place, so
+/// a crash never leaves a half-written output file; `commit` is what makes it visible.
 enum Output {
     Stdout(io::Stdout),
     File {
@@ -471,8 +472,7 @@ enum Output {
 }
 
 fn open_output(cmd: &Cmd) -> Result<Output, String> {
-    let to_stdout = cmd.to_stdout || cmd.output.as_deref().map_or(true, |p| p.as_os_str() == "-");
-    if to_stdout {
+    if writes_stdout(cmd) {
         return Ok(Output::Stdout(io::stdout()));
     }
     let path = cmd.output.as_ref().expect("output path");
@@ -482,8 +482,10 @@ fn open_output(cmd: &Cmd) -> Result<Output, String> {
             path.display()
         ));
     }
+    // the process id keeps two conversions into the same place apart and leaves a user file
+    // that happens to be called `<name>.tmp` alone
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}.tmp", std::process::id()));
     let tmp = PathBuf::from(tmp);
     let file = fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
     Ok(Output::File {
@@ -494,16 +496,24 @@ fn open_output(cmd: &Cmd) -> Result<Output, String> {
 }
 
 impl Output {
-    fn commit(self) -> Result<(), String> {
-        match self {
-            Output::Stdout(mut stdout) => stdout.flush().map_err(|e| format!("stdout: {e}")),
-            Output::File { file, tmp, path } => {
-                drop(file);
-                fs::rename(&tmp, &path).map_err(|e| {
-                    let _ = fs::remove_file(&tmp);
-                    format!("{}: {e}", path.display())
-                })
+    /// Make the result visible: flush stdout, or rename the temporary file into place.
+    fn commit(mut self) -> Result<(), String> {
+        match &mut self {
+            Output::Stdout(stdout) => stdout.flush().map_err(|e| format!("stdout: {e}")),
+            Output::File { tmp, path, .. } => {
+                fs::rename(&*tmp, &*path).map_err(|e| format!("{}: {e}", path.display()))
             }
+        }
+    }
+}
+
+impl Drop for Output {
+    /// Leaving a temporary file behind is the one thing an aborted write must not do: the
+    /// error path, a panic and `commit`'s own failure all land here, and a successful rename
+    /// has already taken the name away.
+    fn drop(&mut self) {
+        if let Output::File { tmp, .. } = self {
+            let _ = fs::remove_file(tmp);
         }
     }
 }

@@ -232,8 +232,7 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
   `-1..-12 -d -z -c -t -f -q -v -B4..-B7 -BD -BX --no-frame-crc --content-size
   -T# --single-thread --rm -h -V`、bundled 短选项（`-9f`、`-B4D`）、`-` 作 stdin/stdout、
   多帧文件全解、原子写出（`.tmp` + rename）、`--rm` 仅在成功后删源。
-  尚未做：`-m/--multiple`、`--list`、`-b`、legacy `-l`、字典；整文件读入内存（等 M4c 的
-  `Read`/`Write` 适配层）。
+  尚未做：`-m/--multiple`、`--list`、`-b`、legacy `-l`、字典压缩（`-D` 只解码）。
 
 ---
 
@@ -266,3 +265,20 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 | R46 | 误导性工具（工具即文档） | `c_oracle blockdict2` 把"字典"和"两个块"放在不同缓冲区，`dictSize` 涨过字典长度后 C 读越界内存 | 删掉该模式；`DESIGN.md` §11 写明跨块判据只能用真帧，并记下为什么 |
 | R47 | Overexposure | `block::Encoder` 是 `pub`，但主路径（历史累积）已知不正确 | **已处置：从库里删掉**（git 历史 `535b5d1`、`bdbdb0a` 保留实现）。结论写进 `DESIGN.md` §11"试做记录"，下一轮按那里的四条重新开始。删的时候发现：声称"由 fixture 钉住"的那个测试**从未被加上**（插入点匹配到的是 `hc.rs` 里同名测试，`replace` 静默没命中），fixture 也没有任何测试读——所以那条提交信息与本文 R40 的措辞都不成立，一并更正 |
 | R48 | 与 C 的已知分歧 | 历史末尾不足 4/8 字节的候选：C 会读过字典缓冲区末尾 | **已定案**（`DESIGN.md` §11 末节）：linked 帧是 prefix 模式，读过的字节就是本块开头、有定义，**必须复现**（跨边界拼接）；`-D` 的 extDict 模式读的是分配外内存、C 自己未定义，判为"不匹配"，并在做 `-D` 压缩时写进 README —— 全项目唯一一处主动与 C 不同 |
+
+## 第 10 轮：`par`、CLI、frame 里从未做过设计评审的部分
+
+第 9 轮只看 M4d 的新代码；这一轮把 `src/par.rs`（914 行）、`cli/src/main.rs`（702 行）、
+`src/frame.rs` 的解码器过了一遍红旗清单。**没有发现逻辑错误**，发现的是重复、死状态和**过时文档**
+——最后一类最危险，因为它让人以为某个能力不存在（unknown unknown）。
+
+| # | 红旗 | 位置 | 处置 |
+|---|---|---|---|
+| R49 | Repetition | `par` 里"分配 `compress_bound` → 压缩 → `truncate`"写了两遍（顺序路径的 `one` 闭包、worker 循环体），而两者必须永远一致 | 收敛成 `block_range()` + `pack_block()`，两条路径都调它 |
+| R50 | 死状态（看起来可调、其实不可调） | `Control.k_lo`/`k_hi` 从来不变（`k` 只会减、不会加），`k_hi` 只用在最后一句必然为真的 `.min()` 上 | 删掉两个字段；"只能缩小"现在从代码里就能看出来，而不是从三个字段里猜 |
+| R51 | Repetition（一条规则两处实现） | "输出是不是 stdout"这个判断（`-c` / 输出名 `-` / 没有输出）在 `check_terminals` 与 `open_output` 各写一份 | 提成 `writes_stdout(cmd)`，两处调用 |
+| R52 | 未处理的资源（**真问题，不只是风格**） | `Output::File` 没有 `Drop`：解码失败/写失败时 `<name>.tmp` 留在磁盘上；而且 `open_output` 只拒绝覆盖目标文件，不拒绝覆盖**用户自己的** `<name>.tmp` | 加 `Drop`（`commit` 成功改名后它自然什么都不做）；临时名带 `std::process::id()`，既不会撞车也不会碰用户的文件。新测试 `a_failed_decode_leaves_no_temporary_file` 钉住 |
+| R53 | 过时文档（最严重的 unknown unknown） | `cli/src/main.rs` 模块文档说"读入整个输入、frame 层还是整缓冲"，`README.md` 说"0.0.x 预发布、frame 无 `Read`/`Write` 适配层、无字典"——M4c 之后这些全部不成立 | 按当前事实重写；README 的 `0.0.x` 段落改成 `0.1.x` 的能力与已知缺口 |
+| R54 | 重复的错误串 + 可变闭包 | `-B` 解析里同一条错误信息写了两遍，还用一个 `FnMut` 闭包去改 `cmd` | 改成"读到什么算什么"的直白写法，一条错误信息 |
+| R55 | 小噪音 | `parse` 里 `cmd.input.clone().unwrap()`（刚 `remove` 出来的值） | 用值本身 |
+| R56 | 观察，不改 | `frame` 解码器每块 `resize` 出一个完整块的零空间（最多 4 MiB memset），因为解压长度事先不可知；这是 safe Rust 的代价，写法上已是最省的 | 记录在此，不在热路径上做无谓优化 |
