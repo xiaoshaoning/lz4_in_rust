@@ -748,7 +748,7 @@ impl Encoder {
         self.current -= excess as u32;
         let delta = excess as u32;
         for e in self.table.iter_mut() {
-            *e = if *e < delta { 0 } else { *e - delta };
+            *e = (*e).saturating_sub(delta);
         }
         debug_assert_eq!(self.current, self.base + self.dict.len() as u32);
     }
