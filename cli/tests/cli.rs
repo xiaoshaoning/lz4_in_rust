@@ -125,6 +125,63 @@ fn a_failed_decode_leaves_no_temporary_file() {
     assert!(!case.path("bad").exists(), "no half-written output");
 }
 
+/// A frame whose descriptor *names* its dictionary, decoded without `-D`: the reference reports
+/// the id and lets the blocks fail, so the tool says what is missing instead of leaving the user
+/// with a bare "invalid offset".
+#[test]
+fn a_frame_that_names_its_dictionary_says_so_when_it_is_missing() {
+    let fixture = |name: &str| {
+        std::fs::read(format!(
+            "{}/../tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    };
+    let dict = fixture("frame/dict.bin");
+    let frame = fixture("frame/text-dict.lz4");
+    let data = fixture("text.raw");
+
+    let case = Case::new("named-dict");
+    case.write("dict.bin", &dict);
+    case.write("named.lz4", &declare_dictionary_id(&frame, &dict));
+
+    let out = case.run(&["-d", "named.lz4"]);
+    assert!(
+        !out.ok,
+        "a frame that needs its dictionary must not decode without it"
+    );
+    assert!(
+        out.stderr.contains("pass the dictionary with -D"),
+        "{}",
+        out.stderr
+    );
+
+    // and it decodes when the dictionary is supplied
+    let out = case.run(&["-f", "-D", "dict.bin", "-d", "named.lz4"]);
+    assert!(out.ok, "{}", out.stderr);
+    assert_eq!(case.read("named"), data);
+}
+
+/// Rewrite a frame's descriptor to carry a `dictID` (FLG bit 0), recomputing the header
+/// checksum: the same edit the reference makes when it is told to record the dictionary id.
+fn declare_dictionary_id(frame: &[u8], dict: &[u8]) -> Vec<u8> {
+    let flg = frame[4];
+    let mut out = frame[..4].to_vec();
+    out.push(flg | 0x01);
+    out.push(frame[5]);
+    let mut at = 6;
+    if flg & 0x08 != 0 {
+        out.extend_from_slice(&frame[at..at + 8]);
+        at += 8;
+    }
+    let id = lz4_in_rust::xxhash::Xxh32::oneshot(dict);
+    out.extend_from_slice(&id.to_le_bytes());
+    at += 1; // the old checksum, which now comes after the id
+    out.push((lz4_in_rust::xxhash::Xxh32::oneshot(&out[4..]) >> 8) as u8);
+    out.extend_from_slice(&frame[at..]);
+    out
+}
+
 #[test]
 fn compress_then_decompress_through_files() {
     let case = Case::new("roundtrip");

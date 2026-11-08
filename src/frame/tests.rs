@@ -429,6 +429,50 @@ fn dictionary_frames_decode_only_with_their_dictionary() {
     assert_eq!(d.content, want);
 }
 
+/// A frame whose descriptor declares a `dictID` is a normal frame: the id names the dictionary,
+/// the reference reports it and never compares it, and the blocks either decode or fail on their
+/// own. Refusing such frames outright would make `lz4 -D` output with the id flag unreadable.
+#[test]
+fn a_declared_dictionary_id_is_reported_not_enforced() {
+    let read = |name: &str| {
+        std::fs::read(format!(
+            "{}/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    };
+    let dict = read("frame/dict.bin");
+    let frame = read("frame/text-dict.lz4");
+    let want = read("text.raw");
+
+    let with_id = declare_dictionary_id(&frame, crate::xxhash::Xxh32::oneshot(&dict));
+    let d = decompress_with_dict(&with_id, &dict).expect("decode a frame that names its dict");
+    assert_eq!(d.content, want);
+    assert_eq!(d.info.dict_id, Some(crate::xxhash::Xxh32::oneshot(&dict)));
+
+    // the id is not a promise that a dictionary is needed: the blocks decide, as in the reference
+    assert!(matches!(decompress(&with_id), Err(Error::InvalidOffset(_))));
+}
+
+/// Rewrite a frame's descriptor to carry `dict_id`: set FLG bit 0, insert the four bytes after
+/// any content size, and recompute the header checksum.
+fn declare_dictionary_id(frame: &[u8], dict_id: u32) -> Vec<u8> {
+    let flg = frame[4];
+    let mut out = frame[..4].to_vec();
+    out.push(flg | 0x01);
+    out.push(frame[5]); // block size id
+    let mut at = 6;
+    if flg & 0x08 != 0 {
+        out.extend_from_slice(&frame[at..at + 8]);
+        at += 8;
+    }
+    out.extend_from_slice(&dict_id.to_le_bytes());
+    at += 1; // skip the old checksum, which moves to the end of the descriptor
+    out.push(header_checksum(&out[4..]));
+    out.extend_from_slice(&frame[at..]);
+    out
+}
+
 #[test]
 fn block_sizes_off_the_ladder_are_rejected() {
     let src = corpus(100);

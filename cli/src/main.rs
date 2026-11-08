@@ -420,7 +420,7 @@ fn decode_into(cmd: &Cmd, out: &mut dyn Write) -> Result<u64, String> {
     let written = io::copy(&mut dec, out).map_err(|e| {
         // prefer the codec's wording when the failure came from the frame layer
         match dec.last_error() {
-            Some(codec) => format!("{}: {codec}", describe_input(cmd)),
+            Some(codec) => format!("{}: {codec}{}", describe_input(cmd), dict_hint(cmd, &dec)),
             None => format!("{}: {e}", describe_input(cmd)),
         }
     })?;
@@ -428,6 +428,17 @@ fn decode_into(cmd: &Cmd, out: &mut dyn Write) -> Result<u64, String> {
         return Err(format!("{}: not an LZ4 frame", describe_input(cmd)));
     }
     Ok(written)
+}
+
+/// A frame that names a dictionary, decoded without one: the codec's own error is an invalid
+/// offset, which says nothing about the cause, so say it.
+fn dict_hint<R: Read>(cmd: &Cmd, dec: &frame::Decoder<R>) -> &'static str {
+    match (&cmd.dictionary, dec.info()) {
+        (None, Some(info)) if info.dict_id.is_some() => {
+            " (this frame declares a dictionary id: pass the dictionary with -D)"
+        }
+        _ => "",
+    }
 }
 
 /// `LZ4F_optimalBSID`: the smallest 64 KiB..4 MiB block that still holds `src_len`, never

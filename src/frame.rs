@@ -27,8 +27,10 @@
 //!
 //! Scope: **decoding** with a dictionary is supported ([`Decoder::with_dict`]), which is what
 //! `lz4 -D` produces; *compressing* with one is not ported yet, because the reference drives
-//! that through a stateful stream context whose hash table survives across blocks. A frame
-//! that declares a `dictID` is decoded when a dictionary is supplied and reported otherwise.
+//! that through a stateful stream context whose hash table survives across blocks. A frame that
+//! declares a `dictID` decodes like any other — the id lands in [`FrameInfo`] and, as in the
+//! reference, is never compared against the dictionary — so such a frame fails on an invalid
+//! offset unless the caller supplied the dictionary it was built with.
 //! `content_size` can only be declared when the caller knows it up front (a file): a
 //! non-seekable stream cannot go back and patch its own descriptor.
 
@@ -587,14 +589,6 @@ impl<R: Read> Decoder<R> {
                 })
                 .map(Some);
         }
-        if dict_id.is_some() {
-            return self
-                .fail(Error::Unsupported(
-                    "frame declares a dictionary id: dictionaries are not ported",
-                ))
-                .map(Some);
-        }
-
         // every frame starts from the dictionary (or from nothing), not from history
         self.window.clear();
         self.window.extend_from_slice(&self.dict_tail);

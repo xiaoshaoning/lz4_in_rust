@@ -188,10 +188,17 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
   以及"降了之后负载恢复，能自己加回去"。
   **时机**：frame 编码器出现时（它才是"跨调用"存在的地方）。
 
-- [ ] **R8 frame 的三个已知缺口**（M4c，见 `DESIGN.md` §6）
-  ① `Read`/`Write` 适配层（现在整帧在内存里）；② 字典（frame 声明 dictID 时明确报错，而不是解错）；
-  ③ 写 *linked* 帧时其实没有跨块引用（block 层还没有字典），比值等同 independent——帧合法、
-  `lz4` 能解，但没有吃到 linked 的收益；④ 有 content size 时解压可以并行（块边界已知），现在串行。
+- [ ] **R8 frame 的缺口**（逐个处理；① ② 已完成，③ ④ 未做）
+  - [x] ① `Read`/`Write` 适配层：M4c 已有流式 `Encoder`/`Decoder`，CLI 全程流式。
+  - [x] ② 字典**解码**：`Decoder::with_dict` + CLI `-D`。**本轮补上的缺口**：以前只要帧声明了
+    `dictID` 就一律拒收（消息还写着"dictionaries are not ported"，而它其实是支持的），
+    于是 `lz4 -D` 打开 id 标志后写出的帧我们读不了。现在与参考一致：`dictID` 只报告
+    （`FrameInfo.dict_id`）、从不比对，块自己决定能不能解；CLI 在"帧点名要字典而没给 `-D`"时
+    补一句提示（不然用户只看到 `invalid match offset`）。`a_declared_dictionary_id_is_reported_not_enforced`
+    （库）与 `a_frame_that_names_its_dictionary_says_so_when_it_is_missing`（CLI）钉住。
+  - [ ] ②' 字典**编码**：需要 block 层的状态编码器（M4d A/B 步）。
+  - [ ] ③ 写 *linked* 帧时没有跨块引用，比值等同 independent——帧合法、`lz4` 能解，但没吃到收益。
+  - [ ] ④ 有 content size 时解压可以并行（块边界已知），现在串行。
 
 ### 工程与测试
 
