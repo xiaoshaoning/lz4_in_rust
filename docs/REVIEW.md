@@ -157,14 +157,13 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
   "本移植还没有"（如 HC 未移植）。
   **验收**：frame 的错误测试按变体匹配，而不是匹配字符串。
 
-- [ ] **R4 两段 worker 骨架重复**（compress：原子游标 + join 回收；decompress：mutex 栈原地写）。
-  合并时顺手把 `Control.k` 拆成 `AtomicUsize`：现在它与统计量共用一把锁，每个 worker 每块都要抢一次锁只为读一个数。
-  队列形状不同是**有理由的**（压缩不能预分配全部输出块，否则破坏内存预算），但
-  "admit k / 计时 / report / join / 取消"这套骨架可以合成一个 `Scheduler`。
-  **修法**：把 `Control` 收进一个 `Scheduler`（`admit(id) -> bool`、`report(bytes, secs)`、
-  `run(job)`），两处只留各自的队列与结果形态。
-  **时机**：在 frame 解码器成为第三个消费者**之前**做，否则要改三处。
-  **验收**：`par` 现有的 12 个测试全绿，且两个函数各减少 ~15 行。
+- [x] **R4 两段 worker 骨架重复**（compress：原子游标 + join 回收；decompress：mutex 栈原地写）。
+  **已修**：`Scheduler` 收下 `k`（改成 `AtomicUsize`，worker 不再为了读一个数去抢锁）、`cancel`、
+  `Control`、`announce`，并提供 `admit(id)` / `report` / `cancelled` / `cancel_all(gate)`；
+  join + "第一个错误优先 + panic 继续 unwind" 收成 `join_first_error`。两处只留各自的队列与结果形态。
+  **行数**：`compress_each_with` 90 → 79，`decompress_into_with` 60 → 56，重复的骨架从两份变成一份
+  （净 +61 行，因为共享部分的文档写了"为什么"——包括下面 R57 那条，原来根本没写）。
+  **验收**：17 个 `par` 测试全绿（新增 `cancellation_wakes_a_waiting_drainer`）。
 
 - [ ] **R5 `plan_with` 的 `avail` 参数是公开的**（只为测试和受限主机）
   **修法**：文档写明，或把 `plan_with`/`compress_*_with`/`decompress_*_with` 归入
@@ -282,3 +281,20 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 | R54 | 重复的错误串 + 可变闭包 | `-B` 解析里同一条错误信息写了两遍，还用一个 `FnMut` 闭包去改 `cmd` | 改成"读到什么算什么"的直白写法，一条错误信息 |
 | R55 | 小噪音 | `parse` 里 `cmd.input.clone().unwrap()`（刚 `remove` 出来的值） | 用值本身 |
 | R56 | 观察，不改 | `frame` 解码器每块 `resize` 出一个完整块的零空间（最多 4 MiB memset），因为解压长度事先不可知；这是 safe Rust 的代价，写法上已是最省的 | 记录在此，不在热路径上做无谓优化 |
+
+## 第 11 轮：R4 落地时发现的唤醒丢失（R57）
+
+合并两段骨架时把 `cancel` 的写入路径看清了，发现它一直是个（罕见的）**挂死**：
+
+- 压缩池里，worker 失败/退出时把 `cancel` 置位并 `notify_all`，两者都**不持锁**；
+- 排空线程的循环是"持锁 → 看有没有下一块 → 看 `cancel` → `wait`（原子释放锁并睡下）"；
+- 置位若正好落在这两步之间，`wait` 已经开始睡而通知已经发过 → 没有任何人还会再通知它。
+  所有 worker 都停了之后，这里就是永久挂死：调用方等不到错误，只等到卡住。
+
+| # | 红旗 | 处置 |
+|---|---|---|
+| R57 | 并发正确性（lost wakeup） | `Scheduler::cancel_all(gate)` **在排空线程自己那把锁里**置位，再通知：置位与"检查→睡下"被同一把锁排序，窗口消失。`announce` 的 `notify_all` 因此可以放在解锁之后（与 worker 插入后通知同理：状态变更受锁保护） |
+
+**测试有牙**：`cancellation_wakes_a_waiting_drainer` 故意把窗口撑开（检查后、`wait` 前停 100 ms）。
+把 `cancel_all` 改回"不持锁置位"，该测试 10 秒超时失败（已验证）；修复后 0.1 秒通过。
+一个能区分对错、且失败方式是"超时"而不是"偶发"的并发测试，比事后看日志强。

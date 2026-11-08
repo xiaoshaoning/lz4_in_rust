@@ -13,12 +13,15 @@
 //!
 //! Everything is `unsafe`-free: the shared job list is an `AtomicUsize` cursor, worker
 //! results are returned through their join handles, and decoding hands out disjoint
-//! `&mut [u8]` slices from a `Mutex`-guarded stack.
+//! `&mut [u8]` slices from a `Mutex`-guarded stack. Both directions share one scheduler (the
+//! private `Scheduler`) for admission, timing, cancellation and the join, and differ only in
+//! their queue.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::ScopedJoinHandle;
 use std::time::Instant;
 
 use crate::level::{self, Level};
@@ -201,6 +204,81 @@ impl Control {
     }
 }
 
+/// The bookkeeping both pools share: who is still admitted, how long blocks took, and the one
+/// flag that stops everyone. The queue and the result shape stay with the caller — compression
+/// runs a cursor over block indices and hands blocks to a drainer in order, decompression pops
+/// disjoint output slices and writes them in place.
+///
+/// The worker count is an `AtomicUsize` and not a field of [`Control`]: every worker reads it
+/// once per block, and sharing it with the timing behind one mutex made each of them take that
+/// lock per block just to learn whether it still existed.
+struct Scheduler {
+    k: AtomicUsize,
+    cancel: AtomicBool,
+    control: Mutex<Control>,
+    /// Wakes a blocked drainer. Its mutex is the caller's (the one the drainer waits on);
+    /// `cancel_all` takes it so the wakeup cannot be lost.
+    announce: Condvar,
+}
+
+impl Scheduler {
+    fn new(plan: Plan, workers: usize) -> Scheduler {
+        Scheduler {
+            k: AtomicUsize::new(workers),
+            cancel: AtomicBool::new(false),
+            control: Mutex::new(Control::new(plan, workers)),
+            announce: Condvar::new(),
+        }
+    }
+
+    /// Whether worker `id` should take another block: not cancelled, and not shrunk away.
+    fn admit(&self, id: usize) -> bool {
+        !self.cancel.load(Ordering::Relaxed) && id < self.k.load(Ordering::Relaxed)
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Account for a finished block; the controller may shrink the pool by one.
+    fn report(&self, bytes: usize, secs: f64) {
+        let k = lock(&self.control).report(bytes, secs);
+        self.k.store(k, Ordering::Relaxed);
+    }
+
+    /// Stop every worker, because the drainer gave up or one worker failed.
+    ///
+    /// The flag is set while holding `gate` — the mutex the blocked drainer waits under. Set
+    /// outside it, the flag can land between the drainer's check and its `wait`, and with every
+    /// worker already stopped there is nobody left to notify it: the call would hang instead of
+    /// returning the error.
+    fn cancel_all<T>(&self, gate: &Mutex<T>) {
+        {
+            let _held = lock(gate);
+            self.cancel.store(true, Ordering::Relaxed);
+        }
+        self.announce.notify_all();
+    }
+}
+
+/// Join every worker and return its first failure.
+///
+/// A panicking worker is resumed rather than swallowed: an invariant broke, and turning that
+/// into a quiet `Err` would hide a bug behind ordinary error handling.
+fn join_first_error<'s, E>(handles: Vec<ScopedJoinHandle<'s, Result<(), E>>>) -> Result<(), E> {
+    let mut failure: Option<E> = None;
+    for h in handles {
+        match h
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        {
+            Ok(()) => {}
+            Err(e) => failure = failure.or(Some(e)),
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
 /// The bytes job `i` covers: one `block_size`, clipped to the input.
 fn block_range(input_len: usize, i: usize, block_size: usize) -> Range<usize> {
     let start = i * block_size;
@@ -285,27 +363,22 @@ where
     }
 
     // Workers fill a window of finished blocks; the calling thread drains it in order.
-    // `announce` wakes the drainer, `cancel` stops the workers when the drainer gives up
-    // (sink error) or when a worker fails.
     let cursor = AtomicUsize::new(0);
-    let cancel = AtomicBool::new(false);
-    let control = Mutex::new(Control::new(plan, plan.workers));
+    let sched = Scheduler::new(plan, plan.workers);
     let ready: Mutex<BTreeMap<usize, Vec<u8>>> = Mutex::new(BTreeMap::new());
-    let announce = Condvar::new();
 
     std::thread::scope(|s| -> Result<(), E> {
         let mut handles = Vec::with_capacity(plan.workers);
         for id in 0..plan.workers {
-            let (cursor, cancel, control) = (&cursor, &cancel, &control);
-            let (ready, announce) = (&ready, &announce);
+            let (cursor, sched, ready) = (&cursor, &sched, &ready);
             handles.push(s.spawn(move || -> Result<(), E> {
                 let mut wake = WakeOnFailure {
-                    cancel,
-                    announce,
+                    sched,
+                    gate: ready,
                     armed: true,
                 };
                 loop {
-                    if cancel.load(Ordering::Relaxed) || id >= lock(control).k {
+                    if !sched.admit(id) {
                         break; // cancelled, or the controller shrank below us
                     }
                     let i = cursor.fetch_add(1, Ordering::Relaxed);
@@ -315,9 +388,11 @@ where
                     let raw_len = block_range(src.len(), i, plan.block_size).len();
                     let started = Instant::now();
                     let buf = pack_block(src, i, plan.block_size, opts.level)?;
+                    // the insert happens under the drainer's mutex, so notifying after
+                    // releasing it cannot be lost: the change is what orders the two
                     lock(ready).insert(i, buf);
-                    announce.notify_all();
-                    lock(control).report(raw_len, started.elapsed().as_secs_f64());
+                    sched.announce.notify_all();
+                    sched.report(raw_len, started.elapsed().as_secs_f64());
                 }
                 wake.armed = false;
                 Ok(())
@@ -332,49 +407,40 @@ where
                     if let Some(bytes) = q.remove(&next) {
                         break Some(bytes);
                     }
-                    if cancel.load(Ordering::Relaxed) {
+                    if sched.cancelled() {
                         break None; // a worker gave up; its error comes back at the join
                     }
-                    q = announce.wait(q).unwrap_or_else(PoisonError::into_inner);
+                    q = sched
+                        .announce
+                        .wait(q)
+                        .unwrap_or_else(PoisonError::into_inner);
                 }
             };
             let Some(bytes) = block else { break };
             if let Err(e) = sink(next, bytes) {
-                cancel.store(true, Ordering::Relaxed);
-                announce.notify_all();
+                sched.cancel_all(&ready);
                 return Err(e);
             }
             next += 1;
         }
 
-        let mut failure: Option<E> = None;
-        for h in handles {
-            match h
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            {
-                Ok(()) => {}
-                Err(e) => failure = failure.or(Some(e)),
-            }
-        }
-        failure.map_or(Ok(()), Err)
+        join_first_error(handles)
     })
 }
 
-/// Makes sure the draining thread is woken when a worker fails or panics, so it cannot
-/// block forever on `announce`. A worker that finished normally disarms it: setting
-/// `cancel` then would abort its still-running siblings.
+/// Makes sure the draining thread is woken when a worker fails or panics, so it cannot wait
+/// forever for a block that will never come. A worker that finished normally disarms it:
+/// cancelling then would abort its still-running siblings.
 struct WakeOnFailure<'a> {
-    cancel: &'a AtomicBool,
-    announce: &'a Condvar,
+    sched: &'a Scheduler,
+    gate: &'a Mutex<BTreeMap<usize, Vec<u8>>>,
     armed: bool,
 }
 
 impl Drop for WakeOnFailure<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.cancel.store(true, Ordering::Relaxed);
-            self.announce.notify_all();
+            self.sched.cancel_all(self.gate);
         }
     }
 }
@@ -429,31 +495,27 @@ pub fn decompress_into_with(
     }
 
     let queue = Mutex::new(jobs);
-    let control = Mutex::new(Control::new(plan, plan.workers));
+    let sched = Scheduler::new(plan, plan.workers);
     std::thread::scope(|s| -> Result<(), Error> {
         let handles: Vec<_> = (0..plan.workers)
             .map(|id| {
-                let (queue, control) = (&queue, &control);
+                let (queue, sched) = (&queue, &sched);
                 s.spawn(move || -> Result<(), Error> {
                     loop {
-                        if id >= lock(control).k {
+                        if !sched.admit(id) {
                             break;
                         }
                         let job = lock(queue).pop();
                         let Some((i, dst)) = job else { break };
                         let started = Instant::now();
                         let n = decode_block(blocks[i], dst)?;
-                        lock(control).report(n, started.elapsed().as_secs_f64());
+                        sched.report(n, started.elapsed().as_secs_f64());
                     }
                     Ok(())
                 })
             })
             .collect();
-        for h in handles {
-            h.join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
-        }
-        Ok(())
+        join_first_error(handles)
     })
 }
 
@@ -622,6 +684,55 @@ mod tests {
             c.report(1, 0.001); // huge throughput
         }
         assert_eq!(c.k, 3);
+    }
+
+    // ---------------------------------------------------------------- the pool
+
+    /// Cancellation must reach a drainer that is blocked on `announce`.
+    ///
+    /// The flag has to be set while holding the drainer's own mutex: set outside it, it can
+    /// land between the drainer's check and its `wait`, and once every worker has stopped
+    /// there is nobody left to notify — the call would hang instead of returning its error.
+    #[test]
+    fn cancellation_wakes_a_waiting_drainer() {
+        use std::sync::mpsc;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let plan = Plan {
+            workers: 1,
+            block_size: 4096,
+            blocks: 1,
+        };
+        let sched = Arc::new(Scheduler::new(plan, 1));
+        let gate: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+        let (woken, await_woken) = mpsc::channel();
+        let (ready, await_ready) = mpsc::channel();
+        let (waiter_sched, waiter_gate) = (Arc::clone(&sched), Arc::clone(&gate));
+
+        let waiter = std::thread::spawn(move || {
+            let mut held = lock(&waiter_gate);
+            while !waiter_sched.cancelled() {
+                // Deliberately park in the window between the check above and the `wait`
+                // below: that window is where a wakeup is lost when the flag is set outside
+                // the gate. Real code closes it in nanoseconds; here it is opened wide
+                // enough to be deterministic.
+                ready.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+                held = waiter_sched
+                    .announce
+                    .wait(held)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            woken.send(()).unwrap();
+        });
+
+        await_ready.recv().unwrap();
+        sched.cancel_all(&gate);
+        await_woken
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the drainer was never woken");
+        waiter.join().unwrap();
     }
 
     // ---------------------------------------------------------------- roundtrip
