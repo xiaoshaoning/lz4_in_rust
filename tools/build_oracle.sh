@@ -65,6 +65,9 @@ fgen empty 1 7 0 0 1 0 empty-1
 fgen one 1 7 0 0 1 0 one-1
 fgen frame/large 1 4 0 0 1 0 large-b4
 fgen frame/large 1 4 1 0 1 0 large-b4-linked
+# linked blocks over three blocks of input, no checksums: the fixture that proves the history a
+# block references is reproduced exactly (the older `large-b4-linked` is a single-flag variant)
+fgen frame/large 1 4 1 0 0 0 large-b4-linked-plain
 fgen frame/large 1 4 0 1 1 1 large-b4-crc-size
 # a frame compressed against a dictionary (`lz4 -D` style): only decodable with it
 head -c 40000 "$here/tests/fixtures/frame/large.raw" > "$here/tests/fixtures/frame/dict.bin"

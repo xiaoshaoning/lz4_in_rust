@@ -454,6 +454,27 @@ R48 那处越界读（见 §11 末节）。
   （`lz4` 本身把 workers 降为 0）。
 - 逐字节相同意味着不能"改进" extDict 的候选顺序；和 HC 一样，接受"永远跟随 C"。
 
+### A 步：帧的 linked 写路径（已完成）
+
+`block::Encoder`（前缀模式的 `LZ4_compress_fast_continue`）落地，`frame::Encoder` 在
+`Linked` + level 1 时逐块串行压缩；输入 150000 字节、64 KiB 块的三块 linked 帧与 C 的
+`LZ4F_compressBlock_continue` **逐字节相同**（fixture `frame/large-b4-linked-plain.lz4`，
+8766 字节，比 independent 少 4.2%）。
+
+试做时踩的坑（第一次做 A 步时失败的原因，均为索引空间算术）：
+
+1. **重编号后 `base` 不能动**：丢掉最旧的 `delta` 字节时，保留的字节仍在 `base`，只有
+   `current` 减去 `delta`；改动 `base` 会让 `current == base + history.len()` 破掉。
+2. **索引空间必须从一个非零值开始**（`HISTORY_START = MAX_DISTANCE + 1` = `LZ4_loadDict` 的做法），
+   否则"已丢弃的表项"饱和到 0 之后会**冒充**仍然有效的第 0 字节。
+3. **回退（catch up）只在"搜索"路径做**：`ip-1` 探测命中后 `ip == anchor`，参考实现是跳过回退
+   的（`goto _next_match`），照抄回退就会把上一个匹配的尾部吞掉（`anchor > ip` panic）。
+4. `LZ4_isDictSmall` 在这条路径上永远为假（它需要"部分字典"），因此 `prefix_idx_limit` 那套
+   分支在帧路径里不需要 —— 等 `loadDict` 落地时再补。
+
+仍然没做：HC 档（2..=12）的 linked 搜索（B 步），以及 `-D` 的**编码**（需要 `LZ4_loadDict` 与
+`dictSmall` 分支）。在这两件完成前，`-BD` 在 level ≥ 2 时写出的帧仍是"独立块"，CLI 会提示。
+
 ### A 步试做记录（代码已删，结论保留）
 
 试做过一版 A 步（git 历史 `535b5d1`、`bdbdb0a`）：首块（`loadDict` + 一次 `compress_into`）与 C

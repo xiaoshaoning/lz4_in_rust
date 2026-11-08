@@ -202,6 +202,61 @@ fn batches_are_sized_for_the_pool() {
     assert_eq!(super::batch_bytes(block, 16), block * 16);
 }
 
+/// A linked frame must reference the history of the blocks before it — and reproduce the
+/// reference's bytes exactly, which is what proves the history logic, not just that we link.
+///
+/// The fixture is three 64 KiB blocks from the C library: a one-block linked frame would say
+/// nothing (there is no history to reference yet).
+#[test]
+fn linked_blocks_reference_their_history() {
+    let read = |name: &str| {
+        std::fs::read(format!(
+            "{}/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    };
+    let raw = read("frame/large.raw");
+    let theirs = read("frame/large-b4-linked-plain.lz4");
+
+    let linked = Opts {
+        content_checksum: false,
+        ..opts(64 << 10, BlockMode::Linked)
+    };
+    let ours = compress(&raw, &linked).unwrap();
+    assert_eq!(ours.len(), theirs.len(), "linked frame size");
+    assert_eq!(ours, theirs, "linked frame differs from the reference");
+    assert_eq!(decompress(&ours).unwrap().content, raw);
+
+    // the point of linking: fewer bytes than the same data split into independent blocks
+    let independent = Opts {
+        content_checksum: false,
+        ..opts(64 << 10, BlockMode::Independent)
+    };
+    let apart = compress(&raw, &independent).unwrap();
+    assert!(
+        ours.len() < apart.len(),
+        "linked {} vs independent {}",
+        ours.len(),
+        apart.len()
+    );
+}
+
+/// Linking is ported for the fast parser; every higher level still has to produce a frame that
+/// decodes — with independent blocks, which is what the reference's `-BD -9` would not do.
+#[test]
+fn linked_frames_decode_at_every_level() {
+    let src = corpus(300_000);
+    for level in 1..=12u8 {
+        let o = Opts {
+            level: crate::level::Level::new(level).unwrap(),
+            ..opts(64 << 10, BlockMode::Linked)
+        };
+        let frame = compress(&src, &o).unwrap();
+        assert_eq!(decompress(&frame).unwrap().content, src, "level {level}");
+    }
+}
+
 #[test]
 fn content_size_must_be_known_and_correct() {
     let src = corpus(5000);

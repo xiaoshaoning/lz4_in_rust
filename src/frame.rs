@@ -58,13 +58,13 @@ pub enum BlockMode {
     Independent,
     /// A block may reference the 64 KiB before it: better ratio, serial decoding.
     ///
-    /// **Encoding this is not ported yet** (docs/DESIGN.md §11): a frame we *write* with this
-    /// mode is valid and says "linked", but its blocks do not actually reference each other,
-    /// so the ratio equals [`BlockMode::Independent`]. Decoding linked frames, including
-    /// dictionary ones, works. A block-level encoder for it was tried and removed again: it
-    /// matched the reference for a dictionary-loaded *first* block but not across blocks, and
-    /// shipping a public API with a path known to be wrong is worse than not having it
-    /// (docs/DESIGN.md §11 records what the attempt taught).
+    /// Writing one is ported for the fast parser (level 1): blocks really do reference their
+    /// history, and the bytes match the reference exactly (fixture `large-b4-linked-plain`).
+    /// At levels 2..=12 the frame still says "linked" but its blocks are independent — the
+    /// high-compression search would have to walk its hash chain across the history, which is
+    /// step B of docs/DESIGN.md §11 — so the ratio there equals [`BlockMode::Independent`].
+    /// The CLI says so when it happens. Decoding linked frames, dictionary ones included,
+    /// works at every level.
     Linked,
 }
 
@@ -111,6 +111,18 @@ pub struct Opts {
     pub workers: Workers,
     /// Peak-bytes ceiling for the pool's in-flight buffers.
     pub memory_budget: usize,
+}
+
+/// Whether this frame's blocks link, which decides between the serial stateful encoder and the
+/// parallel one.
+///
+/// Linking is ported for the fast parser only: the high-compression encoders search a hash chain
+/// across the history, which is separate work (docs/DESIGN.md §11, step B). A linked frame at
+/// level 2..=12 is therefore written with independent blocks — valid, `lz4` decodes it, but it
+/// does not get the ratio — and the CLI says so.
+fn linked_encoder(opts: &Opts) -> Option<crate::block::Encoder> {
+    (opts.block_mode == BlockMode::Linked && opts.level.is_fast())
+        .then(|| crate::block::Encoder::new(1))
 }
 
 impl Default for Opts {
@@ -214,6 +226,11 @@ pub struct Encoder<W: Write> {
     /// Input not yet compressed; one pool run flushes it.
     pending: Vec<u8>,
     batch: usize,
+    /// The block encoder a *linked* frame needs: it keeps the history the next block may
+    /// reference, which makes linked compression a dependency chain and therefore serial.
+    /// `Some` only when the frame is linked and the level is the fast parser (see
+    /// [`BlockMode::Linked`]).
+    linked: Option<crate::block::Encoder>,
     /// Content checksum over the *input*, updated as bytes arrive.
     digest: Xxh32,
     written: u64,
@@ -262,6 +279,7 @@ impl<W: Write> Encoder<W> {
             pool,
             pending: Vec::with_capacity(batch_bytes(opts.block_size, workers)),
             batch: batch_bytes(opts.block_size, workers),
+            linked: linked_encoder(opts),
             digest: Xxh32::new(0),
             written: 0,
             declared,
@@ -276,6 +294,21 @@ impl<W: Write> Encoder<W> {
         let pool = self.pool;
         let opts = self.opts;
         let out = &mut self.out;
+        if let Some(enc) = self.linked.as_mut() {
+            // linked: one block at a time, each allowed to reference the ones before it. No pool:
+            // a block cannot start before its predecessor exists.
+            let mut packed = vec![0u8; crate::block::compress_bound(opts.block_size)];
+            let mut start = 0usize;
+            while start < pending.len() {
+                let raw = &pending[start..(start + opts.block_size).min(pending.len())];
+                let n = enc.compress_into(raw, &mut packed).map_err(codec)?;
+                write_block(out, raw, &packed[..n], &opts)?;
+                start += raw.len();
+            }
+            self.written += pending.len() as u64;
+            self.pending = Vec::with_capacity(self.batch);
+            return Ok(());
+        }
         // One pool run for the batch (the figure the memory budget is sized for), then write
         // the blocks in order: the frame layer never learns how they were compressed.
         let blocks = par::compress(&pending, &pool).map_err(codec)?;

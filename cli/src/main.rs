@@ -364,11 +364,13 @@ fn declared_len(cmd: &Cmd) -> Option<u64> {
 
 /// Compress the input into a frame, one batch of blocks at a time.
 fn compress_stream(cmd: &Cmd) -> Result<(), String> {
-    if cmd.opts.block_mode == frame::BlockMode::Linked && !cmd.quiet {
-        // docs/DESIGN.md §11: the extDict encoder that would let blocks reference each other
-        // is not ported yet, so the frame says "linked" and its blocks stay independent
+    if cmd.opts.block_mode == frame::BlockMode::Linked && !cmd.opts.level.is_fast() && !cmd.quiet {
+        // docs/DESIGN.md §11: linking is ported for the fast parser only (the high-compression
+        // search would have to walk its hash chain across the history). The frame is still valid,
+        // its blocks simply do not reference each other, so say it instead of pretending.
         eprintln!(
-            "lz4r: note: -BD marks the frame as linked, but blocks do not reference each other yet"
+            "lz4r: note: -BD links blocks at level 1 only; level {} writes a linked frame whose blocks are independent",
+            cmd.opts.level.as_u8()
         );
     }
     if cmd.dictionary.is_some() {
