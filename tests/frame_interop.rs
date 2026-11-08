@@ -10,6 +10,8 @@ use lz4_in_rust::frame::{self, BlockMode, Opts};
 use lz4_in_rust::level::Level;
 use lz4_in_rust::Error;
 
+mod common;
+
 fn read(path: &str) -> Vec<u8> {
     let full = format!("{}/tests/fixtures/{path}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read(&full).unwrap_or_else(|e| panic!("{full}: {e}"))
@@ -120,8 +122,7 @@ fn our_frame_is_byte_identical_to_c() {
 
 #[test]
 fn our_frames_decode_with_the_c_library() {
-    let Ok(oracle) = std::env::var("LZ4_C_ORACLE") else {
-        eprintln!("LZ4_C_ORACLE unset: skipping");
+    let Some(oracle) = common::oracle_or_skip("the differential frame tests") else {
         return;
     };
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
@@ -160,19 +161,18 @@ fn our_frames_decode_with_the_c_library() {
         let raw = read(raw_name);
         let packed = frame::compress(&raw, &opts).unwrap();
         std::fs::write(&packed_path, &packed).unwrap();
-        let status = std::process::Command::new(&oracle)
-            .args([
+        let ok = common::oracle_run(
+            &oracle,
+            [
                 "unframe",
                 packed_path.to_str().unwrap(),
                 back_path.to_str().unwrap(),
-            ])
-            .status()
-            .unwrap_or_else(|e| panic!("{oracle}: {e}"));
+            ],
+        );
         assert!(
-            status.success(),
+            ok,
             "{raw_name} ({} blocks, {:?}): C could not decode our frame",
-            opts.block_size,
-            opts.block_mode
+            opts.block_size, opts.block_mode
         );
         assert_eq!(
             std::fs::read(&back_path).unwrap(),

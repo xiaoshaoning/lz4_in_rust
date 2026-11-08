@@ -19,7 +19,8 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+mod common;
 
 use lz4_in_rust::frame::{self, BlockMode, Opts as FrameOpts};
 use lz4_in_rust::{block, par};
@@ -55,18 +56,6 @@ const KINDS: [Kind; 6] = [
 const SIZES: [usize; 12] = [
     0, 1, 4, 12, 13, 64, 4096, 65_535, 65_547, 65_548, 100_000, 300_000,
 ];
-
-fn oracle_path() -> Option<PathBuf> {
-    let path = std::env::var_os("LZ4_C_ORACLE")?;
-    let path = PathBuf::from(path);
-    if !path.exists() {
-        panic!(
-            "LZ4_C_ORACLE points at {} which does not exist",
-            path.display()
-        );
-    }
-    Some(path)
-}
 
 struct Rng(u64);
 
@@ -133,14 +122,6 @@ fn case_dir() -> PathBuf {
     dir
 }
 
-fn oracle_run(oracle: &Path, args: &[&OsStr]) -> bool {
-    let status = Command::new(oracle)
-        .args(args)
-        .status()
-        .unwrap_or_else(|e| panic!("{}: {e}", oracle.display()));
-    status.success()
-}
-
 struct Fixture<'a> {
     oracle: &'a Path,
     raw: PathBuf,
@@ -156,9 +137,9 @@ impl Fixture<'_> {
         std::fs::write(&self.packed, &buf[..n]).unwrap();
         let size = src.len().to_string();
         assert!(
-            oracle_run(
+            common::oracle_run(
                 self.oracle,
-                &[
+                [
                     OsStr::new("unblock"),
                     self.packed.as_os_str(),
                     self.back.as_os_str(),
@@ -177,9 +158,9 @@ impl Fixture<'_> {
     /// C compresses -> we decode it -> the same bytes.
     fn we_decode_c_block(&self, src: &[u8], level: &str, what: &str) {
         std::fs::write(&self.raw, src).unwrap();
-        assert!(oracle_run(
+        assert!(common::oracle_run(
             self.oracle,
-            &[
+            [
                 OsStr::new("block"),
                 OsStr::new(level),
                 self.raw.as_os_str(),
@@ -197,9 +178,9 @@ impl Fixture<'_> {
     /// The high-compression parser must agree with C's, level by level.
     fn hc_bytes_match_c(&self, src: &[u8], level: u8, what: &str) {
         std::fs::write(&self.raw, src).unwrap();
-        assert!(oracle_run(
+        assert!(common::oracle_run(
             self.oracle,
-            &[
+            [
                 OsStr::new("block"),
                 OsStr::new(&level.to_string()),
                 self.raw.as_os_str(),
@@ -226,9 +207,9 @@ impl Fixture<'_> {
     /// Both implementations must emit the same bytes.
     fn block_bytes_match_c(&self, src: &[u8], what: &str) {
         std::fs::write(&self.raw, src).unwrap();
-        assert!(oracle_run(
+        assert!(common::oracle_run(
             self.oracle,
-            &[
+            [
                 OsStr::new("block"),
                 OsStr::new("0"),
                 self.raw.as_os_str(),
@@ -251,9 +232,9 @@ impl Fixture<'_> {
         let packed = frame::compress(src, opts).unwrap();
         std::fs::write(&self.packed, &packed).unwrap();
         assert!(
-            oracle_run(
+            common::oracle_run(
                 self.oracle,
-                &[
+                [
                     OsStr::new("unframe"),
                     self.packed.as_os_str(),
                     self.back.as_os_str(),
@@ -278,7 +259,7 @@ impl Fixture<'_> {
         argv.push(self.raw.as_os_str());
         argv.push(self.packed.as_os_str());
         assert!(
-            oracle_run(self.oracle, &argv),
+            common::oracle_run(self.oracle, argv),
             "{what}: C failed to build a frame"
         );
         let packed = std::fs::read(&self.packed).unwrap();
@@ -334,12 +315,11 @@ fn run_case(fx: &Fixture, kind: Kind, len: usize, seed: u64) {
 
 #[test]
 fn differential_fuzz_against_c() {
-    let Some(oracle) = oracle_path() else {
-        eprintln!(
-            "LZ4_C_ORACLE unset: skipping the differential fuzz ({} cases).\n\
-             build it with tools/build_oracle.sh, then: LZ4_C_ORACLE=target/c-oracle cargo test --release",
-            SIZES.len() * KINDS.len()
-        );
+    let what = format!(
+        "the differential fuzz ({} fixed cases plus LZ4_FUZZ_ROUNDS extra ones);          build the oracle with tools/build_oracle.sh, then:          LZ4_C_ORACLE=target/c-oracle cargo test --release",
+        SIZES.len() * KINDS.len()
+    );
+    let Some(oracle) = common::oracle_or_skip(&what) else {
         return;
     };
 
@@ -390,8 +370,7 @@ fn differential_fuzz_against_c() {
 /// count — the property the whole `par` design rests on, checked on generated data.
 #[test]
 fn parallel_blocks_agree_with_c() {
-    let Some(oracle) = oracle_path() else {
-        eprintln!("LZ4_C_ORACLE unset: skipping");
+    let Some(oracle) = common::oracle_or_skip("the parallel-vs-C check") else {
         return;
     };
     let dir = case_dir();
@@ -417,9 +396,9 @@ fn parallel_blocks_agree_with_c() {
         std::fs::write(&packed, b).unwrap();
         let len = (64 << 10).min(src.len() - offset);
         assert!(
-            oracle_run(
+            common::oracle_run(
                 &oracle,
-                &[
+                [
                     OsStr::new("unblock"),
                     packed.as_os_str(),
                     raw.as_os_str(),

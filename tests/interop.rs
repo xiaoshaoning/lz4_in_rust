@@ -7,6 +7,8 @@
 
 use lz4_in_rust::block::{compress_bound, decompress_into};
 use lz4_in_rust::xxhash::Xxh32;
+
+mod common;
 use lz4_in_rust::Error;
 
 fn read(path: &str) -> Vec<u8> {
@@ -129,8 +131,7 @@ fn level_0_output_is_byte_identical_to_c() {
 /// Skips silently when unset so the test suite stays dependency-free.
 #[test]
 fn c_decodes_our_blocks() {
-    let Ok(oracle) = std::env::var("LZ4_C_ORACLE") else {
-        eprintln!("LZ4_C_ORACLE unset: skipping");
+    let Some(oracle) = common::oracle_or_skip("the differential block tests") else {
         return;
     };
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
@@ -150,19 +151,16 @@ fn c_decodes_our_blocks() {
             let csize = lz4_in_rust::block::compress_into(&raw, &mut packed, acceleration).unwrap();
             std::fs::write(&packed_path, &packed[..csize]).unwrap();
 
-            let status = std::process::Command::new(&oracle)
-                .args([
+            let ok = common::oracle_run(
+                &oracle,
+                [
                     "unblock",
                     packed_path.to_str().unwrap(),
                     tmp.to_str().unwrap(),
                     &raw.len().to_string(),
-                ])
-                .status()
-                .unwrap_or_else(|e| panic!("{oracle}: {e}"));
-            assert!(
-                status.success(),
-                "{name} accel {acceleration}: C failed to decode"
+                ],
             );
+            assert!(ok, "{name} accel {acceleration}: C failed to decode");
             assert_eq!(
                 std::fs::read(&tmp).unwrap(),
                 raw,

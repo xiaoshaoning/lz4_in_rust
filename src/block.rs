@@ -77,31 +77,32 @@ pub fn compress_into(src: &[u8], dst: &mut [u8], acceleration: u32) -> Result<us
         return Ok(out.at);
     }
 
-    // A match may start at most `MFLIMIT` bytes before the end, so nothing at or
-    // beyond `mflimit` is worth hashing.
-    let mflimit = src_len - MFLIMIT + 1;
-    let matchlimit = src_len - LAST_LITERALS;
     let mut table = [0u32; TABLE_SIZE];
 
     // the reference also picks the table shape by input size; keep that choice
     if src_len < SMALL_INPUT_LIMIT {
-        run::<true>(src, &mut out, acceleration, mflimit, matchlimit, &mut table)
+        run::<true>(src, &mut out, acceleration, &mut table)
     } else {
-        run::<false>(src, &mut out, acceleration, mflimit, matchlimit, &mut table)
+        run::<false>(src, &mut out, acceleration, &mut table)
     }
 }
 
 /// The greedy parser, generic over the reference's two table shapes (`byU16` for small
 /// inputs, `byU32` otherwise). Same code, different hash: that is exactly how the
 /// reference keeps its output stable across the 64 KiB switch.
+///
+/// `src` must hold at least [`MIN_LENGTH`] bytes; the two limits below are its consequences,
+/// so they are derived here rather than passed in.
 fn run<const BY_U16: bool>(
     src: &[u8],
     out: &mut Out,
     acceleration: u32,
-    mflimit: usize,
-    matchlimit: usize,
     table: &mut [u32; TABLE_SIZE],
 ) -> Result<usize, Error> {
+    // a match may start at most `MFLIMIT` bytes before the end, so nothing at or beyond
+    // `mflimit` is worth hashing
+    let mflimit = src.len() - MFLIMIT + 1;
+    let matchlimit = src.len() - LAST_LITERALS;
     let mut anchor = 0usize;
     let mut ip = 1usize;
     table[hash::<BY_U16>(src, 0) as usize] = 0;
@@ -358,6 +359,9 @@ fn decompress_impl(src: &[u8], dst: &mut [u8], op_start: usize) -> Result<usize,
             });
         }
 
+        // The same distance ladder as the fast loop above, with one difference that explains why
+        // it is written twice: this path may not write past the end of the run, because here the
+        // destination has not been proven to have `WIDE` bytes of slack.
         if match_len <= WIDE && end + WIDE <= dst_len {
             if offset >= WIDE {
                 copy_wide(dst, op, op - offset);
@@ -520,9 +524,9 @@ pub(crate) fn put_last_literals(out: &mut Out, src: &[u8], anchor: usize) {
     out.put_slice(rest);
 }
 
-/// One bounds check, one unaligned load: indexing the four bytes separately would
-/// cost four checks per call, and this is the hottest helper in both directions.
-/// One unaligned 4-byte load. Shared with `hc`, which loads the same way in its hot loops.
+/// One bounds check, one unaligned load: indexing the four bytes separately would cost four
+/// checks per call, and this is the hottest helper in both directions. Shared with `hc`, whose
+/// search loads the same way.
 #[inline]
 pub(crate) fn read4(src: &[u8], at: usize) -> u32 {
     let mut b = [0u8; 4];
