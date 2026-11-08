@@ -186,11 +186,14 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
   与 HC 9 级）、frame 双向（64 KiB / 4 MiB、独立块 / linked、带 checksum 与 content size）。
   失败会打印 seed 与用例（`LZ4_FUZZ_SEED=` 复现）。实测：72 个固定用例 + 三个不同 seed 各
   60 轮全绿；CI 里 Linux 跑 150 轮、Windows 80 轮。
-- [ ] **E3 平台覆盖**：`i686`（32 位）、大端（全程 `from_le_bytes`，理论安全但未验证）、
-  >4 GiB 输入与多帧拼接。
+- [x] **E3 平台覆盖**：CI 分别跑 **i686-unknown-linux-gnu**（`gcc-multilib`，真的执行测试：覆盖
+  `hc` 里那些 `u32` 索引）和 **s390x** 的 `cargo check`（没有大端 runner 可跑；格式层全程
+  `from_le_bytes`，所以"能编"是能诚实主张的上限）。多帧拼接已在 frame 单测里覆盖；>4 GiB 仍未测。
 - [ ] **E4 `rust-version = 1.75` 未实测**（只在 1.94 编过）。CI 加一个 `cargo +1.75 check`。
-- [ ] **E5 文档测试**：0 个 doctest。给 `lib.rs` 加一段可编译的用法示例，等于多一个测试。
-- [ ] **E6 `#![deny(missing_docs)]`**：公开项基本都有文档，打开这个开关可防止回退。
+- [x] **E5 文档测试**：`src/lib.rs` 顶部加了 block + frame 两个 API 的示例，`cargo test` 会跑它。给 `lib.rs` 加一段可编译的用法示例，等于多一个测试。
+- [x] **E6 `#![deny(missing_docs)]`**：打开后抓到 **34 个**未文档化的公开项（主要是错误枚举的
+  字段、`Opts`/`FrameInfo`/`Plan` 的字段、几个方法），逐个补了有信息量的说明（单位、方向、
+  谁来决定），构建即门。
 
 ### 里程碑（详见 `DESIGN.md` §6）
 

@@ -113,6 +113,9 @@ drifts by up to 3x between runs, so absolute numbers alone are not comparable. E
   with repeats that exercise every match-offset bucket.
 - **Thread invariance** — `Single`, `Fixed(1,2,3,8)` and `Auto` must produce identical blocks.
 - **Differential fuzz** — the sweep described above, over generated data rather than fixtures.
+- **Portability** — the suite also runs on 32-bit (`i686`), the crate compiles for a
+  big-endian target, and Miri (nightly, in CI) checks the small-input logic for undefined
+  behaviour. `#![deny(missing_docs)]` keeps the public surface documented.
 
 ## License
 
