@@ -113,7 +113,8 @@ jobs:
       - name: miri
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
-        # the big sweeps are skipped under Miri (cfg!(miri) guard in the tests); the timeout
-        # is a backstop so a slow run cannot hold the queue for an hour
+        # Miri interprets (~1000x slower): the big sweeps are skipped by a cfg!(miri) guard in
+        # the tests, and even so only the small-input logic is run here. The timeout is a
+        # backstop so a slow run cannot hold the queue.
         run: |
-          timeout 20m cargo miri test --lib 
+          timeout 20m cargo miri test --lib --             'xxhash::' 'level::tests::levels_cover' 'level::tests::level_one'             'par::tests::plan' 'par::tests::control' 'hc::tests::short'             'block::tests::decompress' 'frame::tests::empty_frame' 'frame::tests::header_layout' 
