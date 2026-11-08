@@ -251,6 +251,8 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 
 ## 第 9 轮：M4d A 步新增代码（`block::Encoder`、`frame::compress` 改道、oracle 新命令）
 
+结局：R40–R46 修完后又把整个 `Encoder` 删掉了（见 R47），保留的是结论而不是代码。
+
 按《A Philosophy of Software Design》的红旗清单过了一遍，修掉的按"根因"归并：
 
 | # | 红旗 | 位置 | 处置 |
@@ -262,5 +264,5 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 | R44 | Comment repeats code / 名字与事实不符 | `/// Index of dict[0]`（改名后过时）；`frame::compress` 的文档声称 fixture 覆盖了"linked 路径"（并没有） | 都按事实重写 |
 | R45 | 未文档化的接口契约 | `Encoder::compress_into` 没说 `dst` 容量要求和"块会变成历史"；`new` 没说 acceleration 会被夹到 1 | 补接口注释（Before-implementation 的那种） |
 | R46 | 误导性工具（工具即文档） | `c_oracle blockdict2` 把"字典"和"两个块"放在不同缓冲区，`dictSize` 涨过字典长度后 C 读越界内存 | 删掉该模式；`DESIGN.md` §11 写明跨块判据只能用真帧，并记下为什么 |
-| R47 | Overexposure（**未处置，需要决定**） | `block::Encoder` 是 `pub`，但主路径（历史累积）已知不正确 | 三个选项：(a) 做完它；(b) 从库里删掉（git 里有，`535b5d1`）；(c) 现状。`pub(crate)` 不可行——没人用就是 dead code，CI 的 `-D warnings` 不过。建议在 0.2.0 之前 (a) 或 (b)，不要带着一个"知道不对的公共 API"发版 |
-| R48 | 与 C 的已知分歧（**未处置**） | 历史末尾不足 4/8 字节的候选：C 会读过字典缓冲区末尾（未定义），安全 Rust 只能判为"不匹配" | 已在代码注释里写明；接进 frame 层之前要在 `DESIGN.md` 里定案（这会影响 linked 帧的逐字节相同性） |
+| R47 | Overexposure | `block::Encoder` 是 `pub`，但主路径（历史累积）已知不正确 | **已处置：从库里删掉**（git 历史 `535b5d1`、`bdbdb0a` 保留实现）。结论写进 `DESIGN.md` §11"试做记录"，下一轮按那里的四条重新开始。删的时候发现：声称"由 fixture 钉住"的那个测试**从未被加上**（插入点匹配到的是 `hc.rs` 里同名测试，`replace` 静默没命中），fixture 也没有任何测试读——所以那条提交信息与本文 R40 的措辞都不成立，一并更正 |
+| R48 | 与 C 的已知分歧 | 历史末尾不足 4/8 字节的候选：C 会读过字典缓冲区末尾 | **已定案**（`DESIGN.md` §11 末节）：linked 帧是 prefix 模式，读过的字节就是本块开头、有定义，**必须复现**（跨边界拼接）；`-D` 的 extDict 模式读的是分配外内存、C 自己未定义，判为"不匹配"，并在做 `-D` 压缩时写进 README —— 全项目唯一一处主动与 C 不同 |

@@ -422,9 +422,13 @@ impl Encoder {
 }
 ```
 
-`frame::Encoder` 在 `BlockMode::Linked` 时持有这个 `block::Encoder`，每压完一块就把该块的
-最后 64 KiB 交给 `load_dict`（参考实现是让 `dictEnd == source` 走 `withPrefix64k` 的快捷路径；
-我们的块来自不同的 `Vec`，所以走 `usingExtDict`，与 C 的 `LZ4F_compressBlock_continue` 同路径）。
+`frame::Encoder` 在 `BlockMode::Linked` 时持有这个 `block::Encoder`，**每块只是再调一次
+`compress_into`**：状态自己推进（块成为历史，窗口裁到 64 KiB），`load_dict` 只在
+"用户给了独立字典文件"时调一次 —— 每块重新 `load_dict` 会清表并打断索引连续性，那不是 C 的行为。
+
+C 的 linked 帧走的是 `withPrefix64k`（`dictEnd == source`，历史紧邻当前块），`lz4 -D` 走
+`usingExtDict`（两个缓冲区）。两者在我们的实现里共用同一个索引空间（历史 + 当前块），区别只在
+R48 那处越界读（见 §11 末节）。
 
 ### 要移植的 C 函数（按依赖顺序）
 
@@ -448,14 +452,31 @@ impl Encoder {
   （`lz4` 本身把 workers 降为 0）。
 - 逐字节相同意味着不能"改进" extDict 的候选顺序；和 HC 一样，接受"永远跟随 C"。
 
+### A 步试做记录（代码已删，结论保留）
+
+试做过一版 A 步（git 历史 `535b5d1`、`bdbdb0a`）：首块（`loadDict` + 一次 `compress_into`）与 C
+**逐字节相同**，跨块历史累积不对 —— 同样两块 64 KiB，C 的第二块 2208 字节，那一版 5886。按评审
+结论从库里删掉了：一个已知不对的公共 API 比没有更糟。留下的结论：
+
+1. **索引→内存的映射只能有一份实现**（`seg(index) -> Option<(&[u8], usize)>` 形态：`index < current`
+   走历史，否则走本块）。试做版把它抄了 5 份，三个 bug 全出在这 5 份副本上：匹配长度从候选**处**
+   开始数（应从候选 + 4 处）、回退扩展比较候选**处**的字节（应比较候选**前**一个字节）、跨段计数
+   读错了缓冲区。
+2. `renormDictT` 有**两个**触发理由、同一个位移操作：窗口满，以及 `current` 逼近 2^31。只做前者，
+   >2 GiB 的流会把 `u32` 的 `current` 溢出。位移不改变任何距离，所以不改变任何决策。
+3. **调试方法**：把两边的块解析成 `(literals, offset, matchLen)` 序列逐条比，第一个分歧点就是 bug
+   位置。试做版的三个 bug 都是这样找到的，比看输出总大小快得多。
+4. 跨块状态推进的判据只能是**真帧**（多块 linked 帧，prefix 模式）；`c_oracle blockdict`（单块 +
+   字典）可留作首块的判据。
+
 ### 验证计划（先建 oracle，再写代码）
 
-1. `c_oracle blockdict <level> <dict> <in> <out>`：`LZ4_loadDict` + 一次
-   `LZ4_compress_fast_continue`（首块即字典块）。
-2. 跨块状态推进的判据只能是**真帧**：`lz4 -BD`（或 `c_oracle frame 1 4 1 0 1 0`）产出的多块
-   linked 帧。不能自己拼"`loadDict` + 两个不连续缓冲区"的 oracle：那样 `cctx->dictSize` 会超过字典
-   缓冲区的长度，`dictEnd` 指到分配之外，C 自己就在读越界内存（曾用 `blockdict2` 做过，输出 3902
-   字节，不是有效参考）。
+1. `c_oracle blockdict <dict> <in> <out>`：`LZ4_loadDict` + 一次
+   `LZ4_compress_fast_continue`（首块即字典块）。**注意**：只用它验证首块。
+2. 跨块只能用真帧：`lz4 -BD`（或 `c_oracle frame 1 4 1 0 1 0`）产出的多块 linked 帧。不能自己
+   拼"`loadDict` + 两个不连续缓冲区"的 oracle（试做版有 `blockdict2`，已删）：那样 `cctx->dictSize`
+   会超过字典缓冲区的长度，`dictEnd` 指到分配之外，C 自己就在读越界内存 —— 输出的 3902 字节不是
+   有效参考，试做时曾据此误判。
 3. 帧级：`c_oracle frame-dict`（已存在）产出的 fixture，要求我们的 linked 帧与它**逐字节相同**；
    再在 fuzz 里加"随机字典 + 随机数据"的一轮。
 4. 失败模式：字典不足 4 字节、字典 > 64 KiB、块 < 13 字节、块与字典完全无匹配。
@@ -464,8 +485,20 @@ impl Encoder {
 
 | 步 | 内容 | 判据 |
 |---|---|---|
-| A | fast 档（level 1）的 extDict 编码器 + frame 的 linked 写路径（fast 档） | 与 `frame-dict` fixture 及 `blockdict*` 逐字节相同 |
+| A | fast 档（level 1）的 extDict 编码器 + frame 的 linked 写路径（fast 档） | 首块对 `blockdict`、多块对 `lz4 -BD` 的整帧，逐字节相同 |
 | B | HC 档（2..12）的 extDict 搜索 | 同上，用 `-BD -9` 的 fixture |
 
 在 A、B 都完成之前，`-BD` 写出的帧**仍然不会跨块引用**（帧合法、`lz4` 能解，只是没吃到
 linked 的收益），CLI 会就这件事给一句提示。
+
+### 历史末尾不足 4/8 字节的候选（R48 定案）
+
+C 在字典边界上直接 `LZ4_read32`/`LZ4_read64` 候选位置，字典位于缓冲区末尾时会**读过界**。两种模式
+结局不同，必须分开处理：
+
+- **`withPrefix64k`（linked 帧）**：历史紧邻当前块，读过的字节就是**本块开头**，有定义 → **必须复现**。
+  实现时把历史与本块看成一条连续流：4/8 字节的比较跨边界拼接，匹配计数越过边界后继续在本块里数
+  （试做版的 `count_across` 就是这个思路，方向是对的）。
+- **`usingExtDict`（`lz4 -D` 压独立字典文件）**：读过的是该分配之外的内存 → C 自己的行为未定义，
+  同一输入换个分配器就可能不同。这里**不追求逐字节相同**：安全 Rust 判为"不匹配"。这是全项目唯一
+  一处主动与 C 不同的地方，做 `-D` 压缩时要在 README 的"逐字节相同"说明里点出来。

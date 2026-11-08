@@ -69,9 +69,4 @@ fgen frame/large 1 4 0 1 1 1 large-b4-crc-size
 # a frame compressed against a dictionary (`lz4 -D` style): only decodable with it
 head -c 40000 "$here/tests/fixtures/frame/large.raw" > "$here/tests/fixtures/frame/dict.bin"
 "$out" frame-dict "$here/tests/fixtures/frame/dict.bin"     "$here/tests/fixtures/text.raw" "$here/tests/fixtures/frame/text-dict.lz4"
-printf '%-16s %s
-' "text-dict" "$(wc -c < "$here/tests/fixtures/frame/text-dict.lz4")"
-# the dictionary case the block encoder is verified for (loadDict + one block)
-"$out" blockdict "$here/tests/fixtures/frame/dict.bin"     "$here/tests/fixtures/text.raw" "$here/tests/fixtures/frame/text-dict-block.lz4"
-printf '%-16s %s
-' "text-dict-block" "$(wc -c < "$here/tests/fixtures/frame/text-dict-block.lz4")"
+printf '%-16s %s\n' "text-dict" "$(wc -c < "$here/tests/fixtures/frame/text-dict.lz4")"

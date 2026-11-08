@@ -59,9 +59,10 @@ pub enum BlockMode {
     /// **Encoding this is not ported yet** (docs/DESIGN.md §11): a frame we *write* with this
     /// mode is valid and says "linked", but its blocks do not actually reference each other,
     /// so the ratio equals [`BlockMode::Independent`]. Decoding linked frames, including
-    /// dictionary ones, works. The block-level piece exists ([`crate::block::Encoder`]) and is
-    /// byte-identical for a dictionary-loaded *first* block; its history carry-over between
-    /// blocks is not, so it is not wired in here yet.
+    /// dictionary ones, works. A block-level encoder for it was tried and removed again: it
+    /// matched the reference for a dictionary-loaded *first* block but not across blocks, and
+    /// shipping a public API with a path known to be wrong is worse than not having it
+    /// (docs/DESIGN.md §11 records what the attempt taught).
     Linked,
 }
 
