@@ -593,6 +593,11 @@ mod tests {
 
     #[test]
     fn roundtrip_all_sizes() {
+        // Miri interprets, it does not compile: the big sweeps would take hours there
+        if cfg!(miri) {
+            return;
+        }
+
         for len in 0..600 {
             roundtrip(&noise(len, len as u32), 1);
             let repeated = vec![b'x'; len];
@@ -604,6 +609,11 @@ mod tests {
 
     #[test]
     fn roundtrip_large() {
+        // Miri interprets, it does not compile: the big sweeps would take hours there
+        if cfg!(miri) {
+            return;
+        }
+
         let mut data = noise(100_000, 7);
         // mix in a long repeat so matches reach far back and run long
         let chunk: Vec<u8> = data[0..3000].to_vec();
@@ -619,6 +629,11 @@ mod tests {
     /// compressed at several accelerations, with repeats that hit all offset buckets.
     #[test]
     fn roundtrip_across_fast_loop_boundary() {
+        // Miri interprets, it does not compile: the big sweeps would take hours there
+        if cfg!(miri) {
+            return;
+        }
+
         for len in 0..200 {
             let mut data = noise(len, 99 ^ len as u32);
             if len > 40 {

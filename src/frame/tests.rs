@@ -73,6 +73,11 @@ fn header_layout_matches_the_specification() {
 
 #[test]
 fn roundtrip_every_block_size_and_mode() {
+    // Miri interprets, it does not compile: the big sweeps would take hours there
+    if cfg!(miri) {
+        return;
+    }
+
     for len in [0usize, 1, 100, 0xFFFF, 0x1_0000, 0x1_0001, 0x5_0000] {
         for block_size in [0x1_0000, 0x4_0000, 0x10_0000, 0x40_0000] {
             for mode in [BlockMode::Independent, BlockMode::Linked] {
@@ -103,6 +108,11 @@ fn roundtrip_every_block_size_and_mode() {
 /// the whole-buffer path produces.
 #[test]
 fn write_chunking_does_not_change_the_frame() {
+    // Miri interprets, it does not compile: the big sweeps would take hours there
+    if cfg!(miri) {
+        return;
+    }
+
     let src = corpus(300_000);
     for block_size in [0x1_0000, 0x4_0000] {
         for mode in [BlockMode::Independent, BlockMode::Linked] {
@@ -128,6 +138,11 @@ fn write_chunking_does_not_change_the_frame() {
 /// buffer size is chosen by the caller, not by the format.
 #[test]
 fn read_chunking_does_not_change_the_content() {
+    // Miri interprets, it does not compile: the big sweeps would take hours there
+    if cfg!(miri) {
+        return;
+    }
+
     let src = corpus(200_000);
     let frame = compress(&src, &opts(0x1_0000, BlockMode::Linked)).unwrap();
     for chunk in [1usize, 3, 1000, 1 << 20] {
@@ -150,6 +165,11 @@ fn read_chunking_does_not_change_the_content() {
 /// transcoding one frame into another without ever holding the content in one buffer.
 #[test]
 fn io_copy_between_encoder_and_decoder() {
+    // Miri interprets, it does not compile: the big sweeps would take hours there
+    if cfg!(miri) {
+        return;
+    }
+
     let src = corpus(120_000);
     let from = compress(&src, &opts(0x1_0000, BlockMode::Linked)).unwrap();
     let to_opts = opts(0x4_0000, BlockMode::Independent);
@@ -186,6 +206,11 @@ fn content_size_must_be_known_and_correct() {
 
 #[test]
 fn incompressible_blocks_are_stored_and_still_roundtrip() {
+    // Miri interprets, it does not compile: the big sweeps would take hours there
+    if cfg!(miri) {
+        return;
+    }
+
     // xorshift noise: no matches for LZ4 to find, so every block must be stored
     let mut x = 0x2545_F491u32;
     let src: Vec<u8> = (0..70_000)
@@ -364,6 +389,11 @@ fn block_sizes_off_the_ladder_are_rejected() {
 /// request taken from the data.
 #[test]
 fn arbitrary_bytes_never_panic() {
+    // Miri interprets, it does not compile: the big sweeps would take hours there
+    if cfg!(miri) {
+        return;
+    }
+
     let valid = compress(&corpus(3000), &opts(0x1_0000, BlockMode::Linked)).unwrap();
     let mut x = 0x9E37_79B9_7F4A_7C15u64;
     let mut byte = move || {

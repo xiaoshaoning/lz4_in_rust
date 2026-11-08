@@ -1064,6 +1064,11 @@ mod tests {
     /// port's output to C's without needing a C toolchain.
     #[test]
     fn levels_match_the_c_fixtures() {
+        // Miri interprets, it does not compile: the big sweeps would take hours there
+        if cfg!(miri) {
+            return;
+        }
+
         for (raw_name, frame_name, level) in [
             ("text.raw", "text-l9.lz4", 9u8),
             ("numbers.raw", "numbers-l9.lz4", 9),
@@ -1085,6 +1090,11 @@ mod tests {
 
     #[test]
     fn every_level_roundtrips() {
+        // Miri interprets, it does not compile: the big sweeps would take hours there
+        if cfg!(miri) {
+            return;
+        }
+
         let mut x = 0x2545_F491u32;
         let raw: Vec<u8> = (0..200_000)
             .map(|i| {
