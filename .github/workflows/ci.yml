@@ -65,6 +65,17 @@ jobs:
           target/c-oracle unframe tests/fixtures/frame/text-1.lz4 /tmp/back.raw
           cmp /tmp/back.raw tests/fixtures/text.raw
 
+  msrv:
+    # `rust-version = 1.75` in Cargo.toml is a promise to anyone on an older toolchain; this
+    # job is what keeps it honest. `--all-targets` compiles the tests and examples too, so a
+    # newer std API in test code fails here instead of at a user's `cargo test`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75.0
+      - name: check with the oldest supported toolchain
+        run: cargo check --workspace --all-targets
+
   windows:
     runs-on: windows-latest
     # No job-wide msys2 shell: rustup puts cargo on the *Windows* PATH, which the msys2

@@ -337,11 +337,13 @@ state: k = k0, best = 0, cooldown = 0, elapsed = 0, bytes = 0
 ```rust
 pub enum Workers { Auto, Fixed(usize), Single }
 pub struct Opts { workers: Workers, block_size: usize, memory_budget: usize, level: Level }
-pub fn plan_with(opts, input_len, avail) -> Plan { workers, block_size, blocks } // 纯函数，可单测
+pub fn plan(opts, input_len) -> Plan { workers, block_size, blocks }              // 纯函数
 pub fn compress_each(src, opts, sink: |index, bytes|) -> Result<(), E>           // 按序流式
-pub fn compress_with(src, opts, avail) -> Result<Vec<Vec<u8>>, Error>            // 收集型包装
-pub fn decompress_into_with(blocks, out: &mut [u8], opts, avail) -> Result<(), Error>
+pub fn decompress_into(blocks, out: &mut [u8], opts) -> Result<(), Error>
 pub fn decompress(blocks, original_len, opts) -> Result<Vec<u8>, Error>          // 便利包装
+// 另外两个 `_with(…, avail)` 变体与 `plan_with` 只给测试用，因此是 crate 私有的：
+// 想指定线程数的调用方用 `Workers::Fixed`（CLI 的 `-T#`），而不是自己编一个核数。
+pub const MAX_BLOCK_SIZE: usize = 4 << 20;   // 格式事实（`-B7`）；其余四个策略常量是 pub(crate)
 ```
 
 - 队列：`AtomicUsize` 游标，worker 取号即走。压缩用"完成窗口"（`Mutex<BTreeMap>` + `Condvar`）

@@ -165,16 +165,19 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
   （净 +61 行，因为共享部分的文档写了"为什么"——包括下面 R57 那条，原来根本没写）。
   **验收**：17 个 `par` 测试全绿（新增 `cancellation_wakes_a_waiting_drainer`）。
 
-- [ ] **R5 `plan_with` 的 `avail` 参数是公开的**（只为测试和受限主机）
-  **修法**：文档写明，或把 `plan_with`/`compress_*_with`/`decompress_*_with` 归入
-  `#[doc(hidden)]` + 一个公开的 `plan_on(opts, len, cores)`。避免调用方随手编一个核数。
-  **验收**：公开文档里不再出现"avail"作为推荐用法。
+- [x] **R5 `plan_with` 的 `avail` 参数是公开的**（只为测试和受限主机）
+  **已修，比计划的更彻底**：`plan_with`、`compress_with`、`compress_each_with`、
+  `decompress_into_with` 都改成 crate 私有 —— 先查了调用方，crate 外没有任何一处用它
+  （`frame` 用 `par::plan`/`par::compress_each`，集成测试也不用）。于是不需要
+  `#[doc(hidden)]` + 新公开的 `plan_on`：想指定线程数的调用方本来就有 `Workers::Fixed`。
+  **验收**：`cargo doc` 的 `par` 页面里不再有 `avail`。
 
-- [ ] **R6 `par` 的 5 个公开常量**（`MIN_PARALLEL_BLOCK`、`BLOCKS_PER_WORKER`、`SMALL_HOST_CORES`、
-  `DEFAULT_MEMORY_BUDGET`、`MAX_BLOCK_SIZE`）
-  CLI 帮助文本确实要用，但应在文档里声明它们是**策略**，不是调用方可调的旋钮；
-  若要可调，就统一成 `Opts` 的字段。
-  **验收**：`par` 的模块文档明确"这些是策略常量"。
+- [x] **R6 `par` 的 5 个公开常量**
+  **已修**：原计划只是"声明它们是策略"，实际查下来只有 `MAX_BLOCK_SIZE` 被 crate 外用到
+  （`examples/parallel_probe.rs`），而且它是**格式事实**（`-B7`），不是调参。另外四个
+  （`MIN_PARALLEL_BLOCK`、`BLOCKS_PER_WORKER`、`SMALL_HOST_CORES`、`DEFAULT_MEMORY_BUDGET`）
+  改成 `pub(crate)`，并在常量上方写明"策略，不是 API"。API 面从 5 个旋钮降到 1 个事实。
+  **验收**：`cargo doc` 的 `par` 页面只剩 `MAX_BLOCK_SIZE`。
 
 - [ ] **R7 自适应只在单次调用内生效**（F8 暴露的真缺口）
   现在：`Control` 每次调用新建，`best` 不跨调用；只能降、不能升。
@@ -204,7 +207,10 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 - [x] **E3 平台覆盖**：CI 分别跑 **i686-unknown-linux-gnu**（`gcc-multilib`，真的执行测试：覆盖
   `hc` 里那些 `u32` 索引）和 **s390x** 的 `cargo check`（没有大端 runner 可跑；格式层全程
   `from_le_bytes`，所以"能编"是能诚实主张的上限）。多帧拼接已在 frame 单测里覆盖；>4 GiB 仍未测。
-- [ ] **E4 `rust-version = 1.75` 未实测**（只在 1.94 编过）。CI 加一个 `cargo +1.75 check`。
+- [x] **E4 `rust-version = 1.75` 未实测**（只在 1.94 编过）。CI 加了一个 `msrv` job：
+  `dtolnay/rust-toolchain@1.75.0` + `cargo check --workspace --all-targets`（连测试与 example
+  一起编，这样测试里用了新 std API 会在 CI 挂，而不是在用户的 `cargo test` 挂）。
+  本机 `rustup toolchain install 1.75.0` 下载超时，所以这条由 CI 说话，不以"应该能过"结案。
 - [x] **E5 文档测试**：`src/lib.rs` 顶部加了 block + frame 两个 API 的示例，`cargo test` 会跑它。给 `lib.rs` 加一段可编译的用法示例，等于多一个测试。
 - [x] **E6 `#![deny(missing_docs)]`**：打开后抓到 **34 个**未文档化的公开项（主要是错误枚举的
   字段、`Opts`/`FrameInfo`/`Plan` 的字段、几个方法），逐个补了有信息量的说明（单位、方向、

@@ -27,17 +27,22 @@ use std::time::Instant;
 use crate::level::{self, Level};
 use crate::{block, Error};
 
+// The four knobs below are *policy*, not API: measurements decided them, and a caller who
+// wants different numbers says so with `Workers` (or `Opts`), not by editing constants.
+// They are `pub(crate)` so the doc comment cannot be mistaken for an invitation.
+
 /// Smallest block size worth parallelising: below this the lost cross-block matches cost
 /// more than the threads win (64 KiB blocks measured +13.7% output size).
-pub const MIN_PARALLEL_BLOCK: usize = 1 << 20;
+pub(crate) const MIN_PARALLEL_BLOCK: usize = 1 << 20;
 /// Input must hold at least this many blocks for threads to pay off.
-pub const BLOCKS_PER_WORKER: usize = 8;
+pub(crate) const BLOCKS_PER_WORKER: usize = 8;
 /// At or below this core count, `Auto` uses every core: on a 2-core machine one worker
 /// measured 1.0x while two measured 1.62x, and there is no headroom worth sparing.
-pub const SMALL_HOST_CORES: usize = 4;
+pub(crate) const SMALL_HOST_CORES: usize = 4;
 /// Default peak memory for the pool (compressed + decoded buffers per worker).
-pub const DEFAULT_MEMORY_BUDGET: usize = 64 << 20;
-/// Largest block the LZ4 frame format can describe (`-B7`).
+pub(crate) const DEFAULT_MEMORY_BUDGET: usize = 64 << 20;
+/// Largest block the LZ4 frame format can describe (`-B7`) — a fact about the format, not a
+/// tuning knob, which is why it is the one constant that stays public.
 pub const MAX_BLOCK_SIZE: usize = 4 << 20;
 
 /// Who chooses the worker count.
@@ -95,10 +100,11 @@ pub fn plan(opts: &Opts, input_len: usize) -> Plan {
     plan_with(opts, input_len, available_workers())
 }
 
-/// The strategy, as a pure function so it can be tested without threads.
-///
-/// `avail` is the logical CPU count (which respects affinity and cgroup limits).
-pub fn plan_with(opts: &Opts, input_len: usize, avail: usize) -> Plan {
+/// The strategy, as a pure function so it can be tested without threads — private for that
+/// reason: a caller with a better idea of the machine's capacity expresses it through
+/// [`Workers::Fixed`], which is the supported way. `avail` is the logical CPU count that
+/// [`plan`] derives from `available_parallelism()` (which respects affinity and cgroups).
+fn plan_with(opts: &Opts, input_len: usize, avail: usize) -> Plan {
     let block_size = opts.block_size.clamp(1, MAX_BLOCK_SIZE);
     let blocks = input_len.div_ceil(block_size);
     let budget_cap = (opts.memory_budget / (2 * block_size)).max(1);
@@ -319,8 +325,8 @@ pub fn compress(src: &[u8], opts: &Opts) -> Result<Vec<Vec<u8>>, Error> {
     compress_with(src, opts, available_workers())
 }
 
-/// [`compress`] with an explicit core count (tests / `-T#` on a restricted host).
-pub fn compress_with(src: &[u8], opts: &Opts, avail: usize) -> Result<Vec<Vec<u8>>, Error> {
+/// [`compress`] with an explicit core count, for tests.
+fn compress_with(src: &[u8], opts: &Opts, avail: usize) -> Result<Vec<Vec<u8>>, Error> {
     let mut blocks = Vec::with_capacity(plan_with(opts, src.len(), avail).blocks);
     compress_each_with(src, opts, avail, |_, bytes| {
         blocks.push(bytes);
@@ -347,8 +353,8 @@ where
     compress_each_with(src, opts, available_workers(), sink)
 }
 
-/// [`compress_each`] with an explicit core count.
-pub fn compress_each_with<F, E>(src: &[u8], opts: &Opts, avail: usize, mut sink: F) -> Result<(), E>
+/// [`compress_each`] with an explicit core count, for tests.
+fn compress_each_with<F, E>(src: &[u8], opts: &Opts, avail: usize, mut sink: F) -> Result<(), E>
 where
     F: FnMut(usize, Vec<u8>) -> Result<(), E>,
     E: From<Error> + Send,
@@ -461,8 +467,8 @@ pub fn decompress(blocks: &[&[u8]], original_len: usize, opts: &Opts) -> Result<
     Ok(out)
 }
 
-/// [`decompress_into`] with an explicit core count.
-pub fn decompress_into_with(
+/// [`decompress_into`] with an explicit core count, for tests.
+fn decompress_into_with(
     blocks: &[&[u8]],
     out: &mut [u8],
     opts: &Opts,
