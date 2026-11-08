@@ -18,10 +18,10 @@ beats C (memmove instead of an 8-byte wildcopy).
 **`0.1.x`** covers the block codec, every high-compression level (`-2..-12`), the parallel
 engine, the frame format (whole-buffer *and* streaming) and a working command line tool, all
 byte-identical to the reference where the format allows it. Known gaps, all tracked in
-`docs/REVIEW.md`: a linked frame links its blocks at level 1 (levels 2..=12 still write
-independent blocks), and compressing *with* a dictionary works for `-BD` at level 1 —
-independent-block dictionary frames need another mechanism. Decoding works in every
-combination.
+`docs/REVIEW.md`: a linked frame links its blocks at levels 1 and 3..=9 (level 2 and
+10..=12 still write independent blocks); compressing *with* a dictionary works for `-BD` at
+level 1; independent-block dictionary frames need another mechanism. Decoding works in
+every combination.
 
 ## Status
 

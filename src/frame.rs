@@ -59,13 +59,13 @@ pub enum BlockMode {
     Independent,
     /// A block may reference the 64 KiB before it: better ratio, serial decoding.
     ///
-    /// Writing one is ported for the fast parser (level 1): blocks really do reference their
-    /// history, and the bytes match the reference exactly (fixture `large-b4-linked-plain`).
-    /// At levels 2..=12 the frame still says "linked" but its blocks are independent — the
-    /// high-compression search would have to walk its hash chain across the history, which is
-    /// step B of docs/DESIGN.md §11 — so the ratio there equals [`BlockMode::Independent`].
-    /// The CLI says so when it happens. Decoding linked frames, dictionary ones included,
-    /// works at every level.
+    /// Writing one is ported for level 1 (the fast parser's stateful encoder) and levels 3..=9
+    /// (the hash chain's): blocks really do reference their history, and the bytes match the
+    /// reference exactly (fixtures `large-b4-linked-plain`, `large-b4-linked-hc9`). Level 2
+    /// (`lz4mid`) and 10..=12 (the optimal parser) still write a linked frame whose blocks are
+    /// independent — their linked half is the rest of docs/DESIGN.md §11 step B — so the ratio
+    /// there equals [`BlockMode::Independent`]; [`links_blocks`] answers which is which, and the
+    /// CLI says so when it happens. Decoding works in every combination.
     Linked,
 }
 
@@ -121,9 +121,47 @@ pub struct Opts {
 /// across the history, which is separate work (docs/DESIGN.md §11, step B). A linked frame at
 /// level 2..=12 is therefore written with independent blocks — valid, `lz4` decodes it, but it
 /// does not get the ratio — and the CLI says so.
-fn linked_encoder(opts: &Opts) -> Option<crate::block::Encoder> {
-    (opts.block_mode == BlockMode::Linked && opts.level.is_fast())
-        .then(|| crate::block::Encoder::new(1))
+fn linked_encoder(opts: &Opts) -> Option<LinkedEncoder> {
+    if !links_blocks(opts) {
+        return None;
+    }
+    if opts.level.is_fast() {
+        Some(LinkedEncoder::Fast(Box::new(crate::block::Encoder::new(1))))
+    } else {
+        Some(LinkedEncoder::High(Box::new(crate::hc::Encoder::new(
+            opts.level.as_u8(),
+        ))))
+    }
+}
+
+/// The stateful encoder a linked frame uses, whichever parser its level selected.
+///
+/// One field holds either: a frame is fast *or* high-compression, never both, and the call site is
+/// the same — so the flush loop does not have to know which one it is holding.
+enum LinkedEncoder {
+    Fast(Box<crate::block::Encoder>),
+    High(Box<crate::hc::Encoder>),
+}
+
+impl LinkedEncoder {
+    fn compress_into(&mut self, block: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
+        match self {
+            LinkedEncoder::Fast(enc) => enc.compress_into(block, dst),
+            LinkedEncoder::High(enc) => enc.compress_into(block, dst),
+        }
+    }
+}
+
+/// Whether this frame's blocks will reference each other when it is written.
+///
+/// Linking is ported for the fast parser (level 1) and for the hash chain (levels 3..=9). Level 2
+/// (`lz4mid`) and 10..=12 (the optimal parser) have their own drivers, whose linked half is the
+/// rest of docs/DESIGN.md §11 step B — a frame written at those levels is valid and says "linked",
+/// but its blocks are independent. The CLI asks this to say so instead of letting a user wonder
+/// why `-BD -9` and `-BD -12` compress differently.
+pub fn links_blocks(opts: &Opts) -> bool {
+    opts.block_mode == BlockMode::Linked
+        && (opts.level.is_fast() || (3..=9).contains(&opts.level.as_u8()))
 }
 
 /// The stateful encoder a dictionary needs, or the reason this frame cannot have one.
@@ -245,9 +283,8 @@ pub struct Encoder<W: Write> {
     batch: usize,
     /// The block encoder a *linked* frame needs: it keeps the history the next block may
     /// reference, which makes linked compression a dependency chain and therefore serial.
-    /// `Some` only when the frame is linked and the level is the fast parser (see
-    /// [`BlockMode::Linked`]).
-    linked: Option<crate::block::Encoder>,
+    /// `Some` only when this frame's blocks can actually link (see [`links_blocks`]).
+    linked: Option<LinkedEncoder>,
     /// Content checksum over the *input*, updated as bytes arrive.
     digest: Xxh32,
     written: u64,
@@ -315,7 +352,9 @@ impl<W: Write> Encoder<W> {
         let workers = par::plan(&pool, opts.block_size * par::BLOCKS_PER_WORKER).workers;
 
         let linked = match dict {
-            Some(dict) => Some(dictionary_encoder(opts, dict).map_err(unsupported)?),
+            Some(dict) => Some(LinkedEncoder::Fast(Box::new(
+                dictionary_encoder(opts, dict).map_err(unsupported)?,
+            ))),
             None => linked_encoder(opts),
         };
 

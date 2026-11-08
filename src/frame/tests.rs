@@ -315,6 +315,62 @@ fn dictionary_compression_says_what_it_cannot_do() {
     ));
 }
 
+/// The high-compression parser links too (levels 3..=9), and reproduces the reference's bytes: the
+/// history, the tables across blocks and the window trimming all have to be right for this to
+/// hold, which a size comparison would never show.
+#[test]
+fn high_compression_linked_blocks_match_the_reference() {
+    let read = |name: &str| {
+        std::fs::read(format!(
+            "{}/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    };
+    let raw = read("frame/large.raw");
+    let theirs = read("frame/large-b4-linked-hc9.lz4");
+    let o = Opts {
+        content_checksum: false,
+        level: crate::level::Level::new(9).unwrap(),
+        ..opts(64 << 10, BlockMode::Linked)
+    };
+    let ours = compress(&raw, &o).unwrap();
+    assert_eq!(ours.len(), theirs.len(), "size");
+    assert_eq!(ours, theirs, "linked level 9 differs from the reference");
+    assert_eq!(decompress(&ours).unwrap().content, raw);
+
+    // and it pays: the same level with independent blocks is a third bigger
+    let apart = compress(
+        &raw,
+        &Opts {
+            block_mode: BlockMode::Independent,
+            ..o
+        },
+    )
+    .unwrap();
+    assert!(
+        ours.len() * 3 < apart.len() * 2,
+        "linked {} vs independent {}",
+        ours.len(),
+        apart.len()
+    );
+
+    // which levels link is one decision, asked in one place
+    for level in 1..=12u8 {
+        let l = crate::level::Level::new(level).unwrap();
+        let want = matches!(level, 1 | 3..=9);
+        assert_eq!(
+            links_blocks(&Opts {
+                block_mode: BlockMode::Linked,
+                level: l,
+                ..opts(64 << 10, BlockMode::Linked)
+            }),
+            want,
+            "level {level}"
+        );
+    }
+}
+
 /// Linking is ported for the fast parser; every higher level still has to produce a frame that
 /// decodes — with independent blocks, which is what the reference's `-BD -9` would not do.
 #[test]

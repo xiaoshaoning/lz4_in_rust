@@ -403,3 +403,22 @@ fixture + fuzz 守着。
 
 **看过不改的**：`Encoder` 的两个构造入口（`new` 无字典 / `load_dict` 后挂字典）与一个 `build` ——
 这是"常见情况最简单"的形状，合并只会让 `new` 多一个没人用的参数。
+
+## 第 16 轮：B 步（HC 跨历史）——一个"同一块连续内存"就把问题化小了
+
+先量收益再动手：level 9 的 linked 与 independent 在 `large.raw` 上是 7502 vs 12168 字节（**−38%**），
+所以值得做。
+
+关键发现：参考实现在 linked 模式下把**历史与当前块放在同一块连续内存**里（LZ4F 的 `tmpBuff`），
+所以 `LZ4HC_Insert`/`InsertAndGetWiderMatch` 只用一套偏移，没有双缓冲逻辑。于是移植不需要在
+`hc.rs` 里到处加"这是历史还是当前块"的分支：
+
+| # | 做法 | 结果 |
+|---|---|---|
+| R70 | 把哈希链驱动抽成 `hash_chain(buf, out, level, block_at, chain)`：`buf` 可以是单块输入，也可以是"历史 + 块"，`block_at` 是块在其中的起点 | 单块路径行为不变（56 个测试、fixture、差分 fuzz 全绿） |
+| R71 | `hc::Encoder` 持有 `buf: Vec<u8>` + `Chain`；压完一块把 `buf` 裁到最后一个窗口，**只重编号哈希表**（链里存的是距离，不受位移影响） | 3 块 / 32 块 / 8 块、等级 3 与 9、64 KiB 与 256 KiB 块，全部与 C 逐字节相同 |
+| R72 | `frame::Encoder` 的 `Option<block::Encoder>` 变成 `Option<LinkedEncoder>`（`Fast` / `High` 两个变体，一个 `compress_into`） | 写出路径不必知道自己是哪种解析器 |
+| R73 | "哪些等级真的链接"从两处（frame 内部谓词、CLI 提示里手写的条件）合成 `frame::links_blocks(opts)` | CLI 直接问它，不再复制范围判断 |
+
+**没做**：等级 2（`lz4mid`）与 10..=12（optimal parser）的 linked 驱动，以及 HC 档 + `-D`。
+`links_blocks` 与 CLI 提示把这件事说清楚了。

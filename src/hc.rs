@@ -858,24 +858,39 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
     if level >= 10 {
         return compress_optimal(src, &mut out, level);
     }
+    let mut chain = Chain::new();
+    hash_chain(src, &mut out, level, 0, &mut chain)
+}
+
+/// The hash-chain strategy (levels 3..=9), over `buf` — which is the block itself for a
+/// single-shot call, or *history followed by the block* when a [`Encoder`] drives it.
+///
+/// `block_at` is where the block starts in `buf`: literals never begin before it, and everything
+/// before it is history that a match may reference. Because the reference's linked mode keeps
+/// history and block in one contiguous buffer, the search here needs no second-buffer logic at
+/// all — positions are offsets into `buf`, and a candidate is just a smaller offset.
+fn hash_chain(
+    buf: &[u8],
+    out: &mut Out,
+    level: u8,
+    block_at: usize,
+    chain: &mut Chain,
+) -> Result<usize, Error> {
     let attempts = NB_SEARCHES[(level - LEVEL_MIN - 1) as usize];
     let pattern_analysis = attempts > PATTERN_ANALYSIS_FROM;
-
-    let len = src.len();
-    if len < MIN_LENGTH {
-        block::put_last_literals(&mut out, src, 0);
+    let len = buf.len();
+    if len - block_at < MIN_LENGTH {
+        block::put_last_literals(out, buf, block_at);
         return Ok(out.at);
     }
-
-    let mut chain = Chain::new();
+    let src = buf;
     let mflimit = len - block::MFLIMIT;
     let matchlimit = len - block::LAST_LITERALS;
-
-    let mut ip = 0usize;
-    let mut anchor = 0usize;
+    let mut ip = block_at;
+    let mut anchor = block_at;
 
     'outer: while ip <= mflimit {
-        let m1 = find_best_match(&mut chain, src, ip, matchlimit, attempts, pattern_analysis);
+        let m1 = find_best_match(chain, src, ip, matchlimit, attempts, pattern_analysis);
         if m1.len < MIN_MATCH as isize {
             ip += 1;
             continue;
@@ -893,7 +908,7 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
             let (mut start2, mut m2) = if ip + m1.len as usize <= mflimit {
                 let at = ip + m1.len as usize - 2;
                 let m2 = wider_match(
-                    &mut chain,
+                    chain,
                     src,
                     at,
                     ip,
@@ -910,7 +925,7 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
 
             if m2.len <= m1.len {
                 // no better match: encode m1 now
-                encode_sequence(&mut out, src, &mut ip, &mut anchor, m1);
+                encode_sequence(out, src, &mut ip, &mut anchor, m1);
                 continue 'outer;
             }
 
@@ -949,7 +964,7 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
                 let (start3, m3) = if start2 + m2.len <= mflimit as isize {
                     let at = (start2 + m2.len - 3) as usize;
                     let m3 = wider_match(
-                        &mut chain,
+                        chain,
                         src,
                         at,
                         start2 as usize,
@@ -977,7 +992,7 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
                                 m2 = m3;
                             }
                         }
-                        encode_sequence(&mut out, src, &mut ip, &mut anchor, m1);
+                        encode_sequence(out, src, &mut ip, &mut anchor, m1);
                         // `anchor` stays where the encode left it: the one or two bytes
                         // before start3 are literals of the next sequence, not a gap
                         ip = start3 as usize;
@@ -996,13 +1011,13 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
                 if start2 < ip_s + m1.len {
                     m1.len = start2 - ip_s;
                 }
-                encode_sequence(&mut out, src, &mut ip, &mut anchor, m1);
+                encode_sequence(out, src, &mut ip, &mut anchor, m1);
                 ip = start2 as usize;
                 m1 = m2;
 
                 if m3.len <= m1.len {
                     // no better match: encode m1 (the former m2) and go on
-                    encode_sequence(&mut out, src, &mut ip, &mut anchor, m1);
+                    encode_sequence(out, src, &mut ip, &mut anchor, m1);
                     continue 'outer;
                 }
                 // m3 becomes m2
@@ -1012,8 +1027,73 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
         }
     }
 
-    block::put_last_literals(&mut out, src, anchor);
+    block::put_last_literals(out, src, anchor);
     Ok(out.at)
+}
+
+/// A high-compression encoder that remembers what it compressed, so the next block can reference
+/// it — the linked and dictionary half of `LZ4_streamHC_t`.
+///
+/// The reference keeps the history and the block in one contiguous buffer in this mode, so this
+/// does too: `buf` holds the last window of history followed by the block being compressed, and
+/// positions are offsets into it. The tables survive across blocks; dropping old bytes renumbers
+/// the hash entries (the chain stores *deltas*, so it needs nothing).
+///
+/// Ported for levels 3..=9 (the hash chain). Level 2 (`lz4mid`) and 10..=12 (the optimal parser)
+/// keep the single-block path for now: their drivers are separate, and their linked half is the
+/// rest of docs/DESIGN.md §11 step B.
+pub(crate) struct Encoder {
+    buf: Vec<u8>,
+    level: u8,
+    chain: Chain,
+}
+
+impl Encoder {
+    pub(crate) fn new(level: u8) -> Encoder {
+        Encoder {
+            buf: Vec::new(),
+            level,
+            chain: Chain::new(),
+        }
+    }
+
+    pub(crate) fn compress_into(&mut self, block: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
+        if !(LEVEL_MIN + 1..=9).contains(&self.level) {
+            return Err(Error::Unsupported(
+                "linked high compression is ported for levels 3..=9",
+            ));
+        }
+        if block.len() > block::MAX_INPUT_SIZE {
+            return Err(Error::InputTooLarge(block.len()));
+        }
+        let bound = block::compress_bound(block.len());
+        if dst.len() < bound {
+            return Err(Error::OutputTooSmall {
+                need: bound,
+                have: dst.len(),
+            });
+        }
+        let block_at = self.buf.len();
+        self.buf.extend_from_slice(block);
+        let mut out = Out { buf: dst, at: 0 };
+        let size = hash_chain(&self.buf, &mut out, self.level, block_at, &mut self.chain)?;
+        self.trim();
+        Ok(size)
+    }
+
+    /// Keep one window of history for the next block; renumber what the tables still refer to.
+    fn trim(&mut self) {
+        let keep = MAX_DISTANCE + 1;
+        if self.buf.len() <= keep {
+            return;
+        }
+        let delta = (self.buf.len() - keep) as u32;
+        self.buf.drain(..delta as usize);
+        self.chain.next_to_update = self.chain.next_to_update.saturating_sub(delta);
+        for e in self.chain.hash.iter_mut() {
+            *e = (*e).saturating_sub(delta);
+        }
+    }
 }
 
 #[cfg(test)]

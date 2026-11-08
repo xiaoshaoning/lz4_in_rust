@@ -481,8 +481,15 @@ reset、`currentOffset += 64 KB`、保留最后 64 KiB、每 3 字节填表）+ 
 索引一律返回 `None`（等于参考实现的 `prefixIdxLimit` 拒绝），两者效果相同 —— 这也是把索引空间
 从两个窗口处开始（`HISTORY_START`）换来的。
 
+**B 步（部分完成）**：HC 的 3..=9（哈希链）已经能跨块引用，判据是 `large.raw` 上
+`64 KiB × 3 块`、`64 KiB × 32 块`、`256 KiB × 8 块` 三种组合、等级 3 与 9，全部与 C 逐字节相同
+（fixture `frame/large-b4-linked-hc9.lz4`）。做法出乎意料地小：参考实现在 linked 模式下把历史与
+当前块放在**同一块连续内存**里，所以 `hc::Encoder` 也照做 —— `buf` = 最近一个窗口的历史 + 当前块，
+位置就是 `buf` 里的偏移，搜索里不需要任何双缓冲区逻辑；跨块保留的是哈希表与 `next_to_update`，
+裁掉旧字节时只重编号哈希表项（链里存的是*距离*，天然不受影响）。
+
 仍然没做：
-1. HC 档（2..=12）的 linked 搜索（B 步）。
+1. HC 档 **2 与 10..=12** 的 linked 搜索（`lz4mid` 与 optimal parser 各自的驱动）。
 2. **独立块** + 字典（参考实现走 `usingDictCtx`：每块用 `dictCtx` 的两张表查候选）。
 3. HC 档 + 字典（同理需要 B 步）。
 

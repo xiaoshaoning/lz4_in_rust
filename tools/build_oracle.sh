@@ -68,6 +68,8 @@ fgen frame/large 1 4 1 0 1 0 large-b4-linked
 # linked blocks over three blocks of input, no checksums: the fixture that proves the history a
 # block references is reproduced exactly (the older `large-b4-linked` is a single-flag variant)
 fgen frame/large 1 4 1 0 0 0 large-b4-linked-plain
+# the same linked framing through the high-compression parser (levels 3..=9 share one driver)
+fgen frame/large 9 4 1 0 0 0 large-b4-linked-hc9
 fgen frame/large 1 4 0 1 1 1 large-b4-crc-size
 # a frame compressed against a dictionary (`lz4 -D` style): only decodable with it
 head -c 40000 "$here/tests/fixtures/frame/large.raw" > "$here/tests/fixtures/frame/dict.bin"
