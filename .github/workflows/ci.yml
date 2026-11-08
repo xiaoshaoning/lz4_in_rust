@@ -108,7 +108,10 @@ jobs:
         with:
           components: miri
       # undefined-behaviour check; the crate is #![forbid(unsafe_code)], so this mostly
-      # guards the std interactions (slices, threads, I/O)
+      # guards the std interactions (slices, threads, I/O). Isolation is disabled because
+      # some tests read the committed fixtures from disk.
       - name: miri
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
         run: |
           cargo miri test --lib -- 'block::' 'xxhash::' 'level::' 'hc::' 
