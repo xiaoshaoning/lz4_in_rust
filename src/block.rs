@@ -145,23 +145,8 @@ fn run<const BY_U16: bool>(
                 match_at -= 1;
             }
 
-            let literals = &src[anchor..ip];
-            let token_at = out.at;
-            out.put(0); // token, patched once the match length is known
-            out.put_length(literals.len());
-            out.put_slice(literals);
-            out.put_u16_le((ip - match_at) as u16);
-
             let match_len = count_match(src, ip + MIN_MATCH, match_at + MIN_MATCH, matchlimit);
-            let mut code = match_len;
-            if code >= ML_MASK {
-                out.put_length(code);
-                code = ML_MASK;
-            }
-            out.set(
-                token_at,
-                ((literals.len().min(RUN_MASK) << ML_BITS) as u8) | code as u8,
-            );
+            put_sequence(out, &src[anchor..ip], ip - match_at, match_len + MIN_MATCH);
 
             ip += match_len + MIN_MATCH;
             anchor = ip;
@@ -504,8 +489,31 @@ impl Out<'_> {
     }
 }
 
+/// Emit one sequence: literals, token, 16-bit offset, then the match length.
+///
+/// The block format's inner layout, and the only place that knows it: the fast parser here and
+/// the high-compression encoders in `hc` both write their sequences through this function, so a
+/// change to the layout cannot reach one of them and miss the other.
+pub(crate) fn put_sequence(out: &mut Out, literals: &[u8], offset: usize, match_len: usize) {
+    debug_assert!(match_len >= MIN_MATCH, "a sequence needs a match");
+    let token_at = out.at;
+    out.put(0); // patched below, once the extended lengths are written
+    out.put_length(literals.len());
+    out.put_slice(literals);
+    out.put_u16_le(offset as u16);
+    let mut code = match_len - MIN_MATCH;
+    if code >= ML_MASK {
+        out.put_length(code);
+        code = ML_MASK;
+    }
+    out.set(
+        token_at,
+        ((literals.len().min(RUN_MASK) << ML_BITS) as u8) | code as u8,
+    );
+}
+
 /// Emit the closing run: token, optional length bytes, literals.
-fn put_last_literals(out: &mut Out, src: &[u8], anchor: usize) {
+pub(crate) fn put_last_literals(out: &mut Out, src: &[u8], anchor: usize) {
     let rest = &src[anchor..];
     out.put((rest.len().min(RUN_MASK) << ML_BITS) as u8);
     out.put_length(rest.len());
@@ -514,15 +522,17 @@ fn put_last_literals(out: &mut Out, src: &[u8], anchor: usize) {
 
 /// One bounds check, one unaligned load: indexing the four bytes separately would
 /// cost four checks per call, and this is the hottest helper in both directions.
+/// One unaligned 4-byte load. Shared with `hc`, which loads the same way in its hot loops.
 #[inline]
-fn read4(src: &[u8], at: usize) -> u32 {
+pub(crate) fn read4(src: &[u8], at: usize) -> u32 {
     let mut b = [0u8; 4];
     b.copy_from_slice(&src[at..at + 4]);
     u32::from_le_bytes(b)
 }
 
+/// One unaligned 8-byte load, shared with `hc` for the same reason as [`read4`].
 #[inline]
-fn read8(src: &[u8], at: usize) -> u64 {
+pub(crate) fn read8(src: &[u8], at: usize) -> u64 {
     let mut b = [0u8; 8];
     b.copy_from_slice(&src[at..at + 8]);
     u64::from_le_bytes(b)

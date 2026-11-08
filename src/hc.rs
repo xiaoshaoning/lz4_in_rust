@@ -21,7 +21,7 @@
 //! drivers pass the same "no dictionary, not limited" arguments the C does, which makes
 //! those branches unreachable.
 
-use crate::block::{self, count_match, Out};
+use crate::block::{self, count_match, read4, read8, Out};
 use crate::Error;
 
 /// Hash table size (`LZ4HC_HASH_LOG`).
@@ -38,7 +38,6 @@ const MIN_MATCH: usize = block::MIN_MATCH;
 const MAX_DISTANCE: usize = block::MAX_DISTANCE;
 const MIN_LENGTH: usize = block::MFLIMIT + 1;
 const ML_MASK: usize = 15;
-const ML_BITS: u32 = 4;
 const RUN_MASK: usize = 15;
 /// First level handled here (`lz4mid`); level 1 is [`crate::block`].
 pub const LEVEL_MIN: u8 = 2;
@@ -115,13 +114,6 @@ impl Chain {
 // ---------------------------------------------------------------- small helpers
 
 #[inline]
-fn read4(src: &[u8], at: usize) -> u32 {
-    let mut b = [0u8; 4];
-    b.copy_from_slice(&src[at..at + 4]);
-    u32::from_le_bytes(b)
-}
-
-#[inline]
 fn read2(src: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([src[at], src[at + 1]])
 }
@@ -134,13 +126,6 @@ fn can_read2(src: &[u8], at: usize) -> bool {
 #[inline]
 fn hash(v: u32) -> u32 {
     v.wrapping_mul(2_654_435_761) >> (MIN_MATCH as u32 * 8 - HASH_LOG)
-}
-
-#[inline]
-fn read8(src: &[u8], at: usize) -> u64 {
-    let mut b = [0u8; 8];
-    b.copy_from_slice(&src[at..at + 8]);
-    u64::from_le_bytes(b)
 }
 
 /// `LZ4HC_countBack`: how many bytes match before `ip`/`m`, bounded by the two floors.
@@ -290,7 +275,7 @@ fn mid_count_match(src: &[u8], ip: usize, ip_index: u32, pos: u32, matchlimit: u
 fn compress_mid(src: &[u8], out: &mut Out) -> Result<usize, Error> {
     let len = src.len();
     if len < MIN_LENGTH {
-        encode_last_literals(out, src, 0);
+        block::put_last_literals(out, src, 0);
         return Ok(out.at);
     }
     let mut hash4 = vec![0u32; MID_TABLE];
@@ -389,7 +374,7 @@ fn compress_mid(src: &[u8], out: &mut Out) -> Result<usize, Error> {
         ip += 1 + ((ip - anchor) >> 9);
     }
 
-    encode_last_literals(out, src, anchor);
+    block::put_last_literals(out, src, anchor);
     Ok(out.at)
 }
 
@@ -523,7 +508,7 @@ fn compress_optimal(src: &[u8], out: &mut Out, level: u8) -> Result<usize, Error
     let sufficient_len = target_length.min(OPT_NUM - 1) as isize;
     let len = src.len();
     if len < MIN_LENGTH {
-        encode_last_literals(out, src, 0);
+        block::put_last_literals(out, src, 0);
         return Ok(out.at);
     }
 
@@ -636,7 +621,7 @@ fn compress_optimal(src: &[u8], out: &mut Out, level: u8) -> Result<usize, Error
         }
     }
 
-    encode_last_literals(out, src, anchor);
+    block::put_last_literals(out, src, anchor);
     Ok(out.at)
 }
 
@@ -836,39 +821,18 @@ fn find_best_match(
 /// `LZ4HC_encodeSequence`: the same layout as the fast parser, with the match found by the
 /// chain search. Returns the new match length after writing (the caller advances `ip`).
 fn encode_sequence(out: &mut Out, src: &[u8], ip: &mut usize, anchor: &mut usize, m: Match) {
-    let literals = &src[*anchor..*ip];
-    let token_at = out.at;
-    out.put(0);
-    out.put_length(literals.len());
-    out.put_slice(literals);
-    out.put_u16_le(m.off as u16);
-
     debug_assert!(m.len >= MIN_MATCH as isize, "encode_sequence needs a match");
-    let mut code = m.len as usize - MIN_MATCH;
-    if code >= ML_MASK {
-        out.put_length(code);
-        code = ML_MASK;
-    }
-    out.set(
-        token_at,
-        ((literals.len().min(RUN_MASK) << ML_BITS) as u8) | code as u8,
-    );
+    block::put_sequence(out, &src[*anchor..*ip], m.off as usize, m.len as usize);
     // the C's encodeSequence ends with `ip += matchLength; anchor = ip;`
     *ip += m.len as usize;
     *anchor = *ip;
 }
 
-/// `LZ4HC_encodeLastLiterals`.
-fn encode_last_literals(out: &mut Out, src: &[u8], anchor: usize) {
-    let rest = &src[anchor..];
-    out.put((rest.len().min(RUN_MASK) << ML_BITS) as u8);
-    out.put_length(rest.len());
-    out.put_slice(rest);
-}
-
 // ---------------------------------------------------------------- the driver
 
-/// `LZ4HC_compress_hashChain`: greedy, with a two-step lookahead.
+/// The high-compression entry point: picks the strategy for `level` — `lz4mid` at 2, the hash
+/// chain with a two-step lookahead at 3..=9, the optimal parser at 10..=12 — all of them
+/// sharing the block writer and the match counter with this file's neighbours.
 pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usize, Error> {
     // positions are u32 (the format's indices), so the input limit is the format's, not this
     // machine's: a larger slice would wrap the arithmetic instead of failing
@@ -884,7 +848,7 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
     }
     if !(LEVEL_MIN..=LEVEL_MAX).contains(&level) {
         return Err(Error::Unsupported(
-            "hc::compress_into handles levels 2..=9; the caller must route the others",
+            "hc handles levels 2..=12; level 1 belongs to the fast parser",
         ));
     }
     let mut out = Out { buf: dst, at: 0 };
@@ -899,7 +863,7 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
 
     let len = src.len();
     if len < MIN_LENGTH {
-        encode_last_literals(&mut out, src, 0);
+        block::put_last_literals(&mut out, src, 0);
         return Ok(out.at);
     }
 
@@ -1048,7 +1012,7 @@ pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usi
         }
     }
 
-    encode_last_literals(&mut out, src, anchor);
+    block::put_last_literals(&mut out, src, anchor);
     Ok(out.at)
 }
 

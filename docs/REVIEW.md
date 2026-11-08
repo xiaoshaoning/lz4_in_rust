@@ -304,3 +304,35 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 **测试有牙**：`cancellation_wakes_a_waiting_drainer` 故意把窗口撑开（检查后、`wait` 前停 100 ms）。
 把 `cancel_all` 改回"不持锁置位"，该测试 10 秒超时失败（已验证）；修复后 0.1 秒通过。
 一个能区分对错、且失败方式是"超时"而不是"偶发"的并发测试，比事后看日志强。
+
+## 第 12 轮：`src/hc.rs`（1174 行，此前只有逐功能评审，没做过设计评审）
+
+三个策略（`lz4mid` / hash chain / optimal parser）挤在一个文件里是有理由的：它们共享编码器与
+匹配计数。这一轮按红旗清单找的是"同一个知识出现在几处"，而不是逻辑 bug —— 逻辑由逐字节相同的
+fixture + fuzz 守着。
+
+| # | 红旗 | 位置 | 处置 |
+|---|---|---|---|
+| R58 | 注释与代码不符（最误导的一类） | `hc::compress_into` 对越界 level 报 `"handles levels 2..=9; the caller must route the others"`，但它自己就处理 10..=12（`LEVEL_MAX`）；函数文档还只写了 `LZ4HC_compress_hashChain` 一个策略 | 消息改成"hc 处理 2..=12；1 属于 fast"；文档改成"按 level 选策略"并列出三个 |
+| R59 | Information leakage（**序列布局有两份实现**） | `block::run` 与 `hc::encode_sequence` 各自手写 token/literals/offset/匹配长度；`hc::encode_last_literals` 与 `block::put_last_literals` **逐字节相同** | 收成 `block::put_sequence(out, literals, offset, full_match_len)`（唯一知道布局的地方）+ 共享 `put_last_literals`。hc 的两个策略与 fast 档都走它 |
+| R60 | Repetition（微小但便宜的副本） | `read4`/`read8` 在 `block` 与 `hc` 各一份，逐字节相同 | `block::read4`/`read8` 变 `pub(crate)`，hc 删掉自己那两份。顺手删掉因此失去用户的 `hc::ML_BITS` |
+
+**测量**（本项目规矩：改压缩代码必须量，不许估）：输出大小三个等级完全不变（8714 / 7461 / 7460
+字节）；吞吐 best-of-300、同一台噪声较大的机器上交替跑改动前后：
+
+| 等级 | 改动前 | 改动后 |
+|---|---|---|
+| 1 | 4018–5259 MiB/s | 3784–4984 MiB/s |
+| 9 | 108–119 MiB/s | 105–120 MiB/s |
+| 12 | 13 MiB/s | 13–14 MiB/s |
+
+区间重叠，无可测差异（`put_sequence` 是同一串操作同一顺序，只是换了个函数名）。
+
+**看过后不改的**（连理由一起记下来，免得下一个人重查）：
+
+- `protect_dict_end(prefix_idx, …)` 的 `prefix_idx` 在四处调用里都是常量 `PREFIX_IDX`：保留是因为它是
+  C 函数签名的直译，参数本身在文档里说明了"候选位置离前缀起点太近时不能安全地读 4 字节"。
+- `count_back` 先 4 字节后 1 字节的两段回退、`wider_match` 里 `pre` 探测"读不到就算不确定"的处理，
+  都是 C 行为的忠实还原，注释已写明与 C 的差异点（C 会读出缓冲区起点之前）。
+- 位置算术用 `u32` 的安全性由入口的 `MAX_INPUT_SIZE` 检查保证，并有
+  `the_u32_position_arithmetic_cannot_overflow` 钉住。
