@@ -25,8 +25,11 @@
 //! This module owns every format detail: nothing outside needs the field layout, and nothing
 //! inside needs to know how a block is compressed.
 //!
-//! Scope: no dictionaries (a frame declaring a `dictID` is reported, not mis-decoded), and
-//! `content_size` can only be declared when the caller knows it up front (a file), because a
+//! Scope: **decoding** with a dictionary is supported ([`Decoder::with_dict`]), which is what
+//! `lz4 -D` produces; *compressing* with one is not ported yet, because the reference drives
+//! that through a stateful stream context whose hash table survives across blocks. A frame
+//! that declares a `dictID` is decoded when a dictionary is supplied and reported otherwise.
+//! `content_size` can only be declared when the caller knows it up front (a file): a
 //! non-seekable stream cannot go back and patch its own descriptor.
 
 use std::io::{self, Read, Write};
@@ -416,6 +419,9 @@ enum State {
 /// Streaming frame reader: descriptor, block by block, both checksums verified.
 pub struct Decoder<R: Read> {
     input: R,
+    /// The last up-to-64 KiB of a caller-supplied dictionary: a frame compressed with `-D`
+    /// may reference it even from its first block, so the window starts out holding it.
+    dict_tail: Vec<u8>,
     /// Last up-to-64 KiB of decoded output (what a linked block may reference) with the block
     /// being decoded appended, laid out contiguously so block offsets work unchanged.
     window: Vec<u8>,
@@ -443,9 +449,20 @@ impl<R: Read> Decoder<R> {
         Self::with_mode(input, true)
     }
 
+    /// Read frames that were compressed with a dictionary (`lz4 -D`): the dictionary's last
+    /// 64 KiB is made reachable to every block, as the reference expects.
+    pub fn with_dict(input: R, dict: &[u8]) -> Self {
+        let start = dict.len().saturating_sub(crate::block::MAX_DISTANCE);
+        let mut d = Self::with_mode(input, false);
+        d.dict_tail = dict[start..].to_vec();
+        d.window = d.dict_tail.clone();
+        d
+    }
+
     fn with_mode(input: R, one_frame: bool) -> Self {
         Decoder {
             input,
+            dict_tail: Vec::new(),
             window: Vec::new(),
             served_from: 0,
             served_to: 0,
@@ -583,7 +600,9 @@ impl<R: Read> Decoder<R> {
                 .map(Some);
         }
 
+        // every frame starts from the dictionary (or from nothing), not from history
         self.window.clear();
+        self.window.extend_from_slice(&self.dict_tail);
         self.served_from = 0;
         self.served_to = 0;
         self.digest = Xxh32::new(0);
@@ -729,12 +748,21 @@ impl<R: Read> Read for Decoder<R> {
     }
 }
 
+/// [`decompress`] for a frame that was compressed with a dictionary.
+pub fn decompress_with_dict(src: &[u8], dict: &[u8]) -> Result<Decoded, Error> {
+    decode_one(Decoder::with_dict(io::Cursor::new(src), dict))
+}
+
 /// Decode **one** frame from a whole buffer, reporting its descriptor and length.
 ///
 /// Stops at the end of the first frame, so a caller holding several concatenated frames
 /// (`lz4 -m`) can loop on `consumed`. Use [`Decoder`] to walk them in one pass.
 pub fn decompress(src: &[u8]) -> Result<Decoded, Error> {
-    let mut dec = Decoder::one_frame(io::Cursor::new(src));
+    decode_one(Decoder::one_frame(io::Cursor::new(src)))
+}
+
+/// Read one frame's worth of output, then report where it ended.
+fn decode_one(mut dec: Decoder<io::Cursor<&[u8]>>) -> Result<Decoded, Error> {
     let mut content = Vec::new();
     let mut chunk = [0u8; 64 << 10];
     loop {

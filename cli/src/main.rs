@@ -41,6 +41,7 @@ Options:
   -t, --test         decompress and discard: check integrity only
   -f, --force        overwrite the output, allow console input/output
   -B4 .. -B7         block size: 64 KiB, 256 KiB, 1 MiB, 4 MiB (default 4 MiB)
+  -D <file>          dictionary: needed to decode a frame compressed against one
   -BD                blocks depend on the previous one (better ratio, no parallel decode)
   -BX                add a per-block checksum
   --no-frame-crc     no checksum of the whole content (speed, less safety)
@@ -102,6 +103,8 @@ struct Cmd {
     input: Option<PathBuf>,
     output: Option<PathBuf>,
     to_stdout: bool,
+    /// `-D`: the dictionary file, needed to decode a frame compressed against one.
+    dictionary: Option<PathBuf>,
     force: bool,
     quiet: bool,
     verbose: bool,
@@ -122,6 +125,7 @@ fn default_cmd() -> Cmd {
         input: None,
         output: None,
         to_stdout: false,
+        dictionary: None,
         force: false,
         quiet: false,
         verbose: false,
@@ -149,6 +153,14 @@ fn parse(args: &[OsString]) -> Result<Action, String> {
         }
         if text == "--" {
             only_files = true;
+            continue;
+        }
+        if text == "-D" || text == "--dictionary" {
+            let Some(path) = args.get(i) else {
+                return Err(format!("{text} needs a file name"));
+            };
+            cmd.dictionary = Some(PathBuf::from(path));
+            i += 1;
             continue;
         }
         if text.starts_with("--") {
@@ -351,6 +363,11 @@ fn declared_len(cmd: &Cmd) -> Option<u64> {
 
 /// Compress the input into a frame, one batch of blocks at a time.
 fn compress_stream(cmd: &Cmd) -> Result<(), String> {
+    if cmd.dictionary.is_some() {
+        return Err(
+            "compressing with a dictionary (-D) is not ported yet; it decodes fine".to_string(),
+        );
+    }
     let len = declared_len(cmd);
     // The reference tool shrinks the block size to the smallest one that holds the whole
     // input (LZ4F_optimalBSID): a 15 KiB file gets 64 KiB blocks even with -B7. Same ratio,
@@ -385,7 +402,13 @@ fn compress_stream(cmd: &Cmd) -> Result<(), String> {
 /// Decode every frame in the input into `out`, returning the bytes written.
 fn decode_into(cmd: &Cmd, out: &mut dyn Write) -> Result<u64, String> {
     let mut input = open_input(cmd)?;
-    let mut dec = frame::Decoder::new(io::BufReader::new(&mut input));
+    let mut dec = match &cmd.dictionary {
+        Some(path) => {
+            let dict = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            frame::Decoder::with_dict(io::BufReader::new(&mut input), &dict)
+        }
+        None => frame::Decoder::new(io::BufReader::new(&mut input)),
+    };
     let written = io::copy(&mut dec, out).map_err(|e| {
         // prefer the codec's wording when the failure came from the frame layer
         match dec.last_error() {
@@ -627,6 +650,19 @@ mod tests {
         assert_eq!(optimal_block_size(4 << 20, 100 << 20), 4 << 20);
         // an explicit smaller request is never enlarged
         assert_eq!(optimal_block_size(64 << 10, 100 << 20), 64 << 10);
+    }
+
+    #[test]
+    fn dictionary_option_takes_a_file() {
+        let c = cmd(&["-D", "dict.bin", "-d", "in.lz4"]);
+        assert_eq!(c.dictionary.as_deref(), Some(Path::new("dict.bin")));
+        assert_eq!(c.mode, Mode::Decompress);
+        assert_eq!(
+            cmd(&["--dictionary", "d", "f"]).dictionary.as_deref(),
+            Some(Path::new("d"))
+        );
+        assert!(parse_str(&["-D"]).is_err(), "-D without a file name");
+        assert_eq!(cmd(&["f"]).dictionary, None);
     }
 
     #[test]

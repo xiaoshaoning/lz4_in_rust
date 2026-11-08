@@ -5,7 +5,9 @@
  *   c_oracle unblock <in> <out> <size>  decode a raw block into exactly <size> bytes
  *   c_oracle frame <level> <blockid> <linked> <blockcrc> <contentcrc> <contentsize> <in> <out>
  *                                       one whole frame, prefs chosen explicitly
+ *   c_oracle frame-dict <dict> <in> <out>   one frame compressed with a dictionary file
  *   c_oracle unframe <in> <out>         decode a frame with LZ4F_decompress
+ *   c_oracle unframe-dict <dict> <in> <out>  decode a frame that used a dictionary
  *   c_oracle bench <in>                 block compress/decompress throughput, best of 5
  *   c_oracle xxh32 <in>                 XXH32 of the whole file, seed 0
  *   c_oracle xxh32stream <in>           same, fed in irregular chunks (streaming state)
@@ -126,6 +128,49 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    if (argc == 5 && strcmp(argv[1], "frame-dict") == 0) {
+        /* A frame whose blocks may reference a dictionary file: the streaming API with
+         * LZ4F_compressBegin_usingDict, which is what `lz4 -D` does. Linked blocks are
+         * required, since only a linked block can reach into the dictionary. */
+        LZ4F_preferences_t prefs = LZ4F_INIT_PREFERENCES;
+        LZ4F_cctx* cctx = NULL;
+        LZ4F_compressOptions_t options;
+        unsigned char* dict;
+        unsigned char* dst;
+        size_t dictSize, cap, pos, done;
+        memset(&options, 0, sizeof(options));
+        prefs.frameInfo.blockMode = LZ4F_blockLinked;
+        prefs.autoFlush = 1;
+        dict = slurp(argv[2], &dictSize);
+        src = slurp(argv[3], &srcSize);
+        cap = LZ4F_compressFrameBound(srcSize, &prefs) + 64;
+        dst = (unsigned char*)malloc(cap);
+        if (!dst) { return 2; }
+        if (LZ4F_isError(LZ4F_createCompressionContext(&cctx, LZ4F_VERSION))) { return 1; }
+        pos = LZ4F_compressBegin_usingDict(cctx, dst, cap, dict, dictSize, &prefs);
+        if (LZ4F_isError(pos)) {
+            fprintf(stderr, "begin: %s\n", LZ4F_getErrorName(pos));
+            return 1;
+        }
+        done = LZ4F_compressUpdate(cctx, dst + pos, cap - pos, src, srcSize, &options);
+        if (LZ4F_isError(done)) {
+            fprintf(stderr, "update: %s\n", LZ4F_getErrorName(done));
+            return 1;
+        }
+        pos += done;
+        /* one call: the buffer was sized with compressFrameBound, so the footer fits */
+        done = LZ4F_compressEnd(cctx, dst + pos, cap - pos, &options);
+        if (LZ4F_isError(done)) {
+            fprintf(stderr, "end: %s%c", LZ4F_getErrorName(done), 10);
+            return 1;
+        }
+        pos += done;
+        LZ4F_freeCompressionContext(cctx);
+        spit(argv[4], dst, pos);
+        free(dst); free(src); free(dict);
+        return 0;
+    }
+
     if (argc == 4 && strcmp(argv[1], "unframe") == 0) {
         LZ4F_dctx* dctx = NULL;
         size_t pos = 0, len = 0, cap, hint = 1;
@@ -158,6 +203,39 @@ int main(int argc, char** argv)
         LZ4F_freeDecompressionContext(dctx);
         spit(argv[3], out, len);
         free(out); free(src);
+        return 0;
+    }
+
+    if (argc == 5 && strcmp(argv[1], "unframe-dict") == 0) {
+        LZ4F_dctx* dctx = NULL;
+        unsigned char* dict;
+        size_t dictSize, pos = 0, len = 0, cap, hint = 1;
+        char* out;
+        dict = slurp(argv[2], &dictSize);
+        src = slurp(argv[3], &srcSize);
+        cap = srcSize * 8 + 65536;
+        out = (char*)malloc(cap);
+        if (!out) { return 2; }
+        if (LZ4F_isError(LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION))) { return 1; }
+        while (hint != 0) {
+            size_t dstSize = cap - len;
+            size_t inSize = srcSize - pos;
+            size_t const r = LZ4F_decompress_usingDict(dctx, out + len, &dstSize,
+                                                       src + pos, &inSize, dict, dictSize, NULL);
+            if (LZ4F_isError(r)) {
+                fprintf(stderr, "unframe-dict: %s%c", LZ4F_getErrorName(r), 10);
+                return 1;
+            }
+            len += dstSize; pos += inSize; hint = r;
+            if (cap - len < 65536) { cap *= 2; out = (char*)realloc(out, cap); if (!out) return 2; }
+            if (inSize == 0 && dstSize == 0 && hint != 0) {
+                fprintf(stderr, "unframe-dict: truncated input%c", 10);
+                return 1;
+            }
+        }
+        LZ4F_freeDecompressionContext(dctx);
+        spit(argv[4], out, len);
+        free(out); free(src); free(dict);
         return 0;
     }
 

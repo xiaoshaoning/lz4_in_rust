@@ -66,3 +66,8 @@ fgen one 1 7 0 0 1 0 one-1
 fgen frame/large 1 4 0 0 1 0 large-b4
 fgen frame/large 1 4 1 0 1 0 large-b4-linked
 fgen frame/large 1 4 0 1 1 1 large-b4-crc-size
+# a frame compressed against a dictionary (`lz4 -D` style): only decodable with it
+head -c 40000 "$here/tests/fixtures/frame/large.raw" > "$here/tests/fixtures/frame/dict.bin"
+"$out" frame-dict "$here/tests/fixtures/frame/dict.bin"     "$here/tests/fixtures/text.raw" "$here/tests/fixtures/frame/text-dict.lz4"
+printf '%-16s %s
+' "text-dict" "$(wc -c < "$here/tests/fixtures/frame/text-dict.lz4")"

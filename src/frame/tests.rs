@@ -392,6 +392,43 @@ fn declared_content_size_is_enforced() {
     ));
 }
 
+/// A frame compressed with a dictionary (`lz4 -D`, produced by the oracle): decodable when
+/// the dictionary is supplied, and a clean error (not garbage) when it is not.
+#[test]
+fn dictionary_frames_decode_only_with_their_dictionary() {
+    let dict = std::fs::read(format!(
+        "{}/tests/fixtures/frame/dict.bin",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let frame = std::fs::read(format!(
+        "{}/tests/fixtures/frame/text-dict.lz4",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let want = std::fs::read(format!(
+        "{}/tests/fixtures/text.raw",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+
+    let d = decompress_with_dict(&frame, &dict).expect("decode with the dictionary");
+    assert_eq!(d.content, want);
+    assert_eq!(d.consumed, frame.len());
+
+    // without it, the very first match points before the output: an error, not noise
+    assert!(matches!(
+        decompress(&frame),
+        Err(Error::InvalidOffset(_)) | Err(Error::Truncated)
+    ));
+
+    // a dictionary longer than 64 KiB is used from its tail, as the reference does
+    let mut long = vec![0u8; 100_000];
+    long[100_000 - dict.len()..].copy_from_slice(&dict);
+    let d = decompress_with_dict(&frame, &long).expect("the tail is what matters");
+    assert_eq!(d.content, want);
+}
+
 #[test]
 fn block_sizes_off_the_ladder_are_rejected() {
     let src = corpus(100);

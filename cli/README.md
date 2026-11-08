@@ -30,7 +30,7 @@ both work, and `--content-size` is refused on a stream whose length cannot be kn
 ## What it does not do yet
 
 - No `-m`/`--multiple` (directories), no `--list`, no `-b` (benchmark), no legacy `-l`
-  format, no dictionaries.
+  format. `-D` decodes only: compressing with a dictionary is not ported yet.
 - Every level `-1..-12` works and is byte-identical to the reference tool, including its
   block-size shrink for small inputs.
 
