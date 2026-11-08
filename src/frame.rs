@@ -247,8 +247,8 @@ impl<W: Write> Encoder<W> {
             out,
             opts: *opts,
             pool,
-            pending: Vec::with_capacity(opts.block_size * workers),
-            batch: opts.block_size * workers,
+            pending: Vec::with_capacity(batch_bytes(opts.block_size, workers)),
+            batch: batch_bytes(opts.block_size, workers),
             digest: Xxh32::new(0),
             written: 0,
             declared,
@@ -282,21 +282,42 @@ impl<W: Write> Encoder<W> {
     /// an end mark is truncated, not finished.
     pub fn finish(mut self) -> io::Result<W> {
         self.flush_batch()?;
-        self.out.write_all(&0u32.to_le_bytes())?; // end mark
-        if self.opts.content_checksum {
-            self.out.write_all(&self.digest.digest().to_le_bytes())?;
-        }
+        // Checked before the end mark: a descriptor that lies about its size must not be
+        // dressed up as a complete frame. A mismatch means the input was not the length it
+        // declared (a file that grew or shrank while being read).
         if let Some(declared) = self.declared {
             if declared != self.written {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("declared {declared} bytes, wrote {}", self.written),
+                    format!(
+                        "the input declared {declared} bytes but {written} were compressed;                          did the file change while being read?",
+                        written = self.written
+                    ),
                 ));
             }
+        }
+        self.out.write_all(&0u32.to_le_bytes())?; // end mark
+        if self.opts.content_checksum {
+            self.out.write_all(&self.digest.digest().to_le_bytes())?;
         }
         self.out.flush()?;
         Ok(self.out)
     }
+}
+
+/// How much input to hold before one pool run.
+///
+/// [`crate::par`] only uses more than one worker when the input holds at least
+/// `BLOCKS_PER_WORKER` blocks (below that the pool's own overhead is not worth it), so a batch
+/// of `workers` blocks would quietly compress single-threaded for any `-T#` below that. One
+/// worker stays at a single block: there is nothing to batch for.
+fn batch_bytes(block_size: usize, workers: usize) -> usize {
+    let blocks = if workers <= 1 {
+        1
+    } else {
+        workers.max(par::BLOCKS_PER_WORKER)
+    };
+    block_size * blocks
 }
 
 impl<W: Write> Write for Encoder<W> {

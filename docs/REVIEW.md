@@ -97,6 +97,22 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 - `sparsest_chain` 只在 `match_length == best.len`（即本次迭代真的找到匹配）时被调用，所以 `best.len ≥ MINMATCH`，`end = best.len - 3 ≥ 1`，循环必然有界。
 - 三种策略的输出都在 C fixture、差分 fuzz（等级 2/3/9/12）、CLI 端到端三处判等，且 fuzz 在 **debug 构建**下也通过（`debug_assert` 全程开启）。
 
+第八轮评审（M4c 流式重写 + 可移植性扫尾，都是前几轮之后写的）：
+
+| # | 问题 | 红标 | 处置 |
+|---|---|---|---|
+| F36 | **`-T4` 在流式路径上其实只跑了一个线程**：`Encoder` 的批大小是 `block_size × workers`，而 `par` 的"多线程值不值得"门槛要求输入 ≥ 8 个块——`-T2/-T4` 的批不够，策略直接退回 1 个 worker。之前的 benchmark 测的是整缓冲区 `par::compress`，所以从没暴露 | 静默退化（用户以为并行） | 批大小抽成 `batch_bytes(block_size, workers)`：单线程仍是 1 块，多线程至少 8 块；并有单测钉住"多线程的批必须满足门槛"。实测 64 MiB：`-T1` 711 ms → `-T4` 442 ms，且各线程数输出完全相同 |
+| F37 | `Encoder::finish` 在**写完 end mark 和内容校验之后**才发现声明长度不符：产出一个"自称完整、但 descriptor 撒谎"的帧，然后才报错 | 错误发现的时机错了（已经写出去的东西无法收回） | 校验移到 end mark 之前：不匹配就什么都不写完整，调用方看到的是可检测的截断；错误信息提示"文件是否在被读取时变化" |
+| F38 | `hc::compress_into` 没有检查 `MAX_INPUT_SIZE`，但它把位置当 `u32` 用（格式的索引 + 64 KiB 前缀）。>2 GiB 的直接调用会静默回绕（release）或 panic（debug） | 与 `block` 的实现不一致，且违背"任何输入只返回 Err" | 加同样的入口检查；并加一条断言不变式的测试：`MAX_INPUT_SIZE + 前缀偏移 < u32::MAX` |
+| F39 | CLI 的 `optimal_block_size(…, len as usize)`：`u64 → usize` 的 `as` 在 32 位主机上会截断（>4 GiB 文件） | 32 位下的静默截断 | 改 `usize::try_from(len).unwrap_or(usize::MAX)` |
+
+第八轮**核实过、没问题**的：
+
+- `Decoder` 的窗口管理：每块解码前 drain 到最多 64 KiB 历史，`served_from/to` 只在服务完一块后才被下一次解码覆盖（先消费后压缩，索引不会失效）。
+- `Encoder::flush_batch` 的 `par::compress` 一次一批 → 内存 = 批 + 压缩结果，仍是预算量级。
+- `finish` 消费 `self` 并返回 `W`：错误路径上 writer 被丢弃，这是 `io::Result<W>` 的自然结果，已在文档说明。
+- 分块无关性（写 1/7/4K/64K/整块、读 1/3/1000/1M）与"各线程数输出完全相同"两条性质在测试里钉住。
+
 第三轮**只记录、不修**的小问题（工具/性能，不影响正确性）：
 
 - `tools/c_oracle.c` 的 `unframe` 在错误路径上没调 `LZ4F_freeDecompressionContext`（工具里的

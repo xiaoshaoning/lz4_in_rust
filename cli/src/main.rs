@@ -356,7 +356,11 @@ fn compress_stream(cmd: &Cmd) -> Result<(), String> {
     // input (LZ4F_optimalBSID): a 15 KiB file gets 64 KiB blocks even with -B7. Same ratio,
     // less memory, and the frames stay comparable.
     let block_size = match len {
-        Some(len) => optimal_block_size(cmd.opts.block_size, len as usize),
+        // a >4 GiB file on a 32-bit host must not wrap into a tiny value
+        Some(len) => optimal_block_size(
+            cmd.opts.block_size,
+            usize::try_from(len).unwrap_or(usize::MAX),
+        ),
         None => cmd.opts.block_size,
     };
     let opts = frame::Opts {

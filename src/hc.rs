@@ -870,6 +870,11 @@ fn encode_last_literals(out: &mut Out, src: &[u8], anchor: usize) {
 
 /// `LZ4HC_compress_hashChain`: greedy, with a two-step lookahead.
 pub(crate) fn compress_into(src: &[u8], dst: &mut [u8], level: u8) -> Result<usize, Error> {
+    // positions are u32 (the format's indices), so the input limit is the format's, not this
+    // machine's: a larger slice would wrap the arithmetic instead of failing
+    if src.len() > block::MAX_INPUT_SIZE {
+        return Err(Error::InputTooLarge(src.len()));
+    }
     let bound = block::compress_bound(src.len());
     if dst.len() < bound {
         return Err(Error::OutputTooSmall {
@@ -1086,6 +1091,17 @@ mod tests {
                 c_block.len()
             );
         }
+    }
+
+    /// Positions are `u32` here (the format's indices, offset by the 64 KiB prefix), so the
+    /// input limit has to leave room for that offset — that is what makes the casts sound.
+    #[test]
+    fn the_u32_position_arithmetic_cannot_overflow() {
+        let max_position = block::MAX_INPUT_SIZE + super::PREFIX_IDX as usize;
+        assert!(
+            max_position < u32::MAX as usize,
+            "MAX_INPUT_SIZE + prefix offset must fit in u32"
+        );
     }
 
     #[test]

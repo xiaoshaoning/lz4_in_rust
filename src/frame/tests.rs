@@ -186,6 +186,22 @@ fn io_copy_between_encoder_and_decoder() {
     assert_eq!(d.info.block_mode, BlockMode::Independent);
 }
 
+/// The batch has to satisfy the pool's "worth it" gate, else `-T4` silently ran one thread.
+#[test]
+fn batches_are_sized_for_the_pool() {
+    let block = 64 << 10;
+    assert_eq!(super::batch_bytes(block, 1), block, "one worker: one block");
+    for workers in 2..=8 {
+        let bytes = super::batch_bytes(block, workers);
+        assert!(
+            bytes >= block * crate::par::BLOCKS_PER_WORKER,
+            "{workers} workers must batch enough blocks for the pool to use them"
+        );
+        assert_eq!(bytes % block, 0);
+    }
+    assert_eq!(super::batch_bytes(block, 16), block * 16);
+}
+
 #[test]
 fn content_size_must_be_known_and_correct() {
     let src = corpus(5000);
@@ -195,10 +211,12 @@ fn content_size_must_be_known_and_correct() {
     };
     // declared but unknown up front: the descriptor cannot be written
     assert!(Encoder::new(Vec::new(), &o, None).is_err());
-    // declared and wrong: caught at finish
+    // declared and wrong: caught at finish, and no end mark has been written, so what came
+    // out is detectably incomplete rather than a frame that lies
     let mut enc = Encoder::new(Vec::new(), &o, Some(4)).unwrap();
     enc.write_all(&src).unwrap();
-    assert!(enc.finish().is_err());
+    let err = enc.finish().unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     // declared and right: the frame says so
     let frame = stream_once(&src, &o, 777).unwrap();
     assert_eq!(decompress(&frame).unwrap().info.content_size, Some(5000));
