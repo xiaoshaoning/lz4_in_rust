@@ -59,7 +59,9 @@ pub enum BlockMode {
     /// **Encoding this is not ported yet** (docs/DESIGN.md §11): a frame we *write* with this
     /// mode is valid and says "linked", but its blocks do not actually reference each other,
     /// so the ratio equals [`BlockMode::Independent`]. Decoding linked frames, including
-    /// dictionary ones, works.
+    /// dictionary ones, works. The block-level piece exists ([`crate::block::Encoder`]) and is
+    /// byte-identical for a dictionary-loaded *first* block; its history carry-over between
+    /// blocks is not, so it is not wired in here yet.
     Linked,
 }
 
@@ -368,44 +370,27 @@ fn write_block<W: Write>(out: &mut W, raw: &[u8], packed: &[u8], opts: &Opts) ->
     Ok(())
 }
 
-/// Compress a whole buffer into one frame: the same block writer, into a `Vec`.
+/// Compress a whole buffer into one frame: the same writer, into a `Vec`.
+///
+/// Thin layering on purpose — every frame this port writes goes through [`Encoder`], so the
+/// byte-identity fixtures cover the streaming path and the linked path alike.
 pub fn compress(src: &[u8], opts: &Opts) -> Result<Vec<u8>, Error> {
-    if block_size_id(opts.block_size).is_none() {
-        return Err(Error::Unsupported(
-            "frame block size: must be 64 KiB, 256 KiB, 1 MiB or 4 MiB",
-        ));
-    }
     let declared = if opts.content_size {
         Some(src.len() as u64)
     } else {
         None
     };
-    let (desc, len) = descriptor(opts, declared);
+    let mut enc = Encoder::new(Vec::new(), opts, declared).map_err(from_io)?;
+    enc.write_all(src).map_err(from_io)?;
+    enc.finish().map_err(from_io)
+}
 
-    let mut out = Vec::with_capacity(src.len() / 2 + 64);
-    out.extend_from_slice(&MAGIC.to_le_bytes());
-    out.extend_from_slice(&desc[..len]);
-    out.push(header_checksum(&desc[..len]));
-
-    let pool = par::Opts {
-        workers: opts.workers,
-        block_size: opts.block_size,
-        memory_budget: opts.memory_budget,
-        level: opts.level,
-    };
-    par::compress_each(src, &pool, |i, packed| {
-        let start = i * opts.block_size;
-        let raw = &src[start..(start + opts.block_size).min(src.len())];
-        // a Vec cannot fail to write
-        write_block(&mut out, raw, &packed, opts).expect("writing to a Vec never fails");
-        Ok(())
-    })?;
-
-    out.extend_from_slice(&0u32.to_le_bytes());
-    if opts.content_checksum {
-        out.extend_from_slice(&Xxh32::oneshot(src).to_le_bytes());
+/// Recover a codec error from the `io::Error` the frame layer wrapped it in.
+fn from_io(e: io::Error) -> Error {
+    match e.get_ref() {
+        Some(inner) if inner.is::<Error>() => *inner.downcast_ref::<Error>().expect("checked"),
+        _ => Error::Unsupported("frame write failed"),
     }
-    Ok(out)
 }
 
 // ================================================================ reading

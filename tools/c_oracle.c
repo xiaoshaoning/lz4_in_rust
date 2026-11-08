@@ -6,6 +6,8 @@
  *   c_oracle frame <level> <blockid> <linked> <blockcrc> <contentcrc> <contentsize> <in> <out>
  *                                       one whole frame, prefs chosen explicitly
  *   c_oracle frame-dict <dict> <in> <out>   one frame compressed with a dictionary file
+ *   c_oracle blockdict <dict> <in> <out>
+ *                                       raw block with a dictionary (loadDict + continue)
  *   c_oracle unframe <in> <out>         decode a frame with LZ4F_decompress
  *   c_oracle unframe-dict <dict> <in> <out>  decode a frame that used a dictionary
  *   c_oracle bench <in>                 block compress/decompress throughput, best of 5
@@ -167,6 +169,53 @@ int main(int argc, char** argv)
         pos += done;
         LZ4F_freeCompressionContext(cctx);
         spit(argv[4], dst, pos);
+        free(dst); free(src); free(dict);
+        return 0;
+    }
+
+    if (argc == 5 && strcmp(argv[1], "blockdict") == 0) {
+        /* The frame layer's linked path, in isolation: load a dictionary, then compress one
+         * block with LZ4_compress_fast_continue (external dictionary mode). */
+        static LZ4_stream_t stream;
+        unsigned char* dict;
+        size_t dictSize;
+        char* dst;
+        int bound, csize;
+        dict = slurp(argv[2], &dictSize);
+        src = slurp(argv[3], &srcSize);
+        bound = LZ4_compressBound((int)srcSize);
+        dst = (char*)malloc((size_t)bound);
+        if (!dst) { return 2; }
+        if (LZ4_loadDict(&stream, (const char*)dict, (int)dictSize) < 0) { return 1; }
+        csize = LZ4_compress_fast_continue(&stream, (const char*)src, dst, (int)srcSize, bound, 1);
+        if (csize <= 0) { fprintf(stderr, "blockdict failed%c", 10); return 1; }
+        spit(argv[4], dst, (size_t)csize);
+        free(dst); free(src); free(dict);
+        return 0;
+    }
+
+    if (argc == 6 && strcmp(argv[1], "blockdict2") == 0) {
+        /* Two consecutive blocks: the second one references the first through the state. */
+        static LZ4_stream_t stream;
+        unsigned char* dict;
+        size_t dictSize;
+        char* dst;
+        int bound, csize, csize2;
+        size_t half;
+        dict = slurp(argv[2], &dictSize);
+        src = slurp(argv[3], &srcSize);
+        half = srcSize / 2;
+        bound = LZ4_compressBound((int)(srcSize - half));
+        dst = (char*)malloc((size_t)bound);
+        if (!dst) { return 2; }
+        if (LZ4_loadDict(&stream, (const char*)dict, (int)dictSize) < 0) { return 1; }
+        csize = LZ4_compress_fast_continue(&stream, (const char*)src, dst, (int)half, bound, 1);
+        if (csize <= 0) { fprintf(stderr, "blockdict2 first failed%c", 10); return 1; }
+        spit(argv[4], dst, (size_t)csize);
+        csize2 = LZ4_compress_fast_continue(&stream, (const char*)src + half,
+                                           dst, (int)(srcSize - half), bound, 1);
+        if (csize2 <= 0) { fprintf(stderr, "blockdict2 second failed%c", 10); return 1; }
+        spit(argv[5], dst, (size_t)csize2);
         free(dst); free(src); free(dict);
         return 0;
     }

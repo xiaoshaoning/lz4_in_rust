@@ -457,6 +457,307 @@ fn read_extension(src: &[u8], ip: &mut usize) -> Result<usize, Error> {
     }
 }
 
+// ---------------------------------------------------------------- stateful encoder (dictionary / linked blocks)
+
+/// A block encoder that remembers what it compressed, so the next block can reference it.
+///
+/// This mirrors the reference's `LZ4_stream_t` driven by `LZ4_compress_fast_continue` in
+/// **external-dictionary** mode — what a *linked* frame and `lz4 -D` use. The hash table
+/// survives across blocks, and a candidate may live in the history rather than in the block
+/// being compressed, so indices are the reference's: an absolute `currentOffset` that grows
+/// with every byte compressed, with the history occupying `[current - historyLen, current)`.
+///
+/// When the history would exceed the 64 KiB window it is renumbered by the same delta the
+/// reference's `renormDictT` uses; every *distance* — and so every decision — is unchanged.
+///
+/// **Status (docs/DESIGN.md §11, step A in progress).** [`Encoder::load_dict`] followed by one
+/// [`Encoder::compress_into`] is byte-identical to
+/// `LZ4_loadDict` + `LZ4_compress_fast_continue` (pinned by a test against an oracle fixture).
+/// *Accumulating* history — compressing block after block through one encoder — is **not**
+/// byte-identical yet, so the frame layer does not use this type: a linked frame it writes
+/// still has independent blocks.
+///
+/// Deliberately separate from [`compress_into`]: that loop is the hot path and carries no
+/// dictionary branches. This one mirrors a different C function.
+pub struct Encoder {
+    /// The `byU32` table (the reference uses only this table type with a dictionary).
+    table: [u32; TABLE_SIZE],
+    /// History bytes; a table entry `i` refers to `dict[(i - base)]`.
+    dict: Vec<u8>,
+    /// Index of `dict[0]`.
+    base: u32,
+    /// Index just past the history (the reference's `currentOffset`).
+    current: u32,
+    acceleration: u32,
+}
+
+impl Encoder {
+    /// A fresh encoder with no history.
+    pub fn new(acceleration: u32) -> Encoder {
+        Encoder {
+            table: [0; TABLE_SIZE],
+            dict: Vec::new(),
+            base: HISTORY_START,
+            current: HISTORY_START,
+            acceleration: acceleration.max(1),
+        }
+    }
+
+    /// `LZ4_loadDict`: forget everything and make `dict` the history.
+    ///
+    /// Only the last 64 KiB is used, and a dictionary shorter than the hash width (8 bytes) is
+    /// ignored — both as the reference does.
+    pub fn load_dict(&mut self, dict: &[u8]) {
+        *self = Encoder::new(self.acceleration);
+        if dict.len() < 8 {
+            return;
+        }
+        self.dict
+            .extend_from_slice(&dict[dict.len().saturating_sub(MAX_DISTANCE)..]);
+        self.base = self.current - self.dict.len() as u32;
+        // the reference fills the table every 3 bytes
+        let mut i = 0usize;
+        while i + 8 <= self.dict.len() {
+            let h = hash::<false>(&self.dict, i) as usize;
+            self.table[h] = self.base + i as u32;
+            i += 3;
+        }
+    }
+
+    /// `LZ4_compress_fast_continue`: compress one block, referencing the history.
+    pub fn compress_into(&mut self, src: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
+        let bound = compress_bound(src.len());
+        if dst.len() < bound {
+            return Err(Error::OutputTooSmall {
+                need: bound,
+                have: dst.len(),
+            });
+        }
+        let mut out = Out { buf: dst, at: 0 };
+        let src_len = src.len();
+        if src_len > MAX_INPUT_SIZE {
+            return Err(Error::InputTooLarge(src_len));
+        }
+        if src_len < MIN_LENGTH {
+            put_last_literals(&mut out, src, 0);
+            self.advance(src);
+            return Ok(out.at);
+        }
+
+        // Everything below indexes in the reference's space: `start` is where this block
+        // begins, so a candidate below it is in the history.
+        let start = self.current;
+        let mflimit = src_len - MFLIMIT + 1;
+        let matchlimit = src_len - LAST_LITERALS;
+
+        let mut anchor = 0usize;
+        let mut ip = 1usize;
+        let h0 = hash::<false>(src, 0);
+        self.table[h0 as usize] = start;
+        let mut forward_h = hash::<false>(src, ip);
+
+        'outer: loop {
+            // ---- find a candidate, in this block or in the history
+            let mut match_at;
+            let mut forward_ip = ip;
+            let mut step = 1usize;
+            let mut search_match_nb = self.acceleration << SKIP_TRIGGER;
+            loop {
+                let h = forward_h;
+                let current = start + forward_ip as u32;
+                let candidate = self.table[h as usize];
+                ip = forward_ip;
+                forward_ip += step;
+                step = (search_match_nb >> SKIP_TRIGGER) as usize;
+                search_match_nb += 1;
+                if forward_ip > mflimit {
+                    break 'outer;
+                }
+                forward_h = hash::<false>(src, forward_ip);
+                self.table[h as usize] = current;
+
+                if self.is_match(src, candidate, current, ip) {
+                    match_at = candidate;
+                    break;
+                }
+            }
+
+            // ---- emit matches until the byte at `ip` starts none
+            loop {
+                // Back-extension, bounded below by the history start (the reference's
+                // lowLimit). A candidate in the history may walk back to the history's first
+                // byte; a candidate in this block stops at the block's first byte, because
+                // index space and memory space are only contiguous per segment.
+                let low = if match_at < start { self.base } else { start };
+                while ip > anchor && match_at > low {
+                    // the byte *before* each side, as the reference compares `ip[-1]`/`match[-1]`
+                    let earlier = if match_at < start {
+                        self.dict[(match_at - self.base) as usize - 1]
+                    } else {
+                        src[(match_at - start) as usize - 1]
+                    };
+                    if earlier != src[ip - 1] {
+                        break;
+                    }
+                    ip -= 1;
+                    match_at -= 1;
+                }
+                let offset = start + ip as u32 - match_at;
+
+                let literals = &src[anchor..ip];
+                let token_at = out.at;
+                out.put(0);
+                out.put_length(literals.len());
+                out.put_slice(literals);
+                out.put_u16_le(offset as u16);
+
+                // both branches report the length *beyond* MIN_MATCH, like the single-shot loop
+                let match_len = if match_at < start {
+                    self.count_across(src, match_at, ip, matchlimit)
+                } else {
+                    count_match(
+                        src,
+                        ip + MIN_MATCH,
+                        (match_at - start) as usize + MIN_MATCH,
+                        matchlimit,
+                    )
+                };
+                let mut code = match_len;
+                if code >= ML_MASK {
+                    out.put_length(code);
+                    code = ML_MASK;
+                }
+                out.set(
+                    token_at,
+                    ((literals.len().min(RUN_MASK) << ML_BITS) as u8) | code as u8,
+                );
+
+                ip += match_len + MIN_MATCH;
+                anchor = ip;
+                if ip >= mflimit {
+                    break 'outer;
+                }
+
+                match self.next_match(src, ip, start) {
+                    Some(at) => match_at = at,
+                    None => {
+                        ip += 1;
+                        forward_h = hash::<false>(src, ip);
+                        continue 'outer;
+                    }
+                }
+            }
+        }
+
+        put_last_literals(&mut out, src, anchor);
+        self.advance(src);
+        Ok(out.at)
+    }
+
+    /// The candidate test shared by the search loop: same 4 bytes, close enough, and inside
+    /// the history we still hold.
+    #[inline]
+    fn is_match(&self, src: &[u8], candidate: u32, current: u32, ip: usize) -> bool {
+        if candidate == 0 || candidate >= current {
+            return false; // empty slot, or not in the past
+        }
+        if candidate + (MAX_DISTANCE as u32) < current {
+            return false; // too far to encode
+        }
+        if candidate < self.current {
+            // in the history
+            if candidate < self.base {
+                return false; // fell out of the window
+            }
+            let at = (candidate - self.base) as usize;
+            u32::from_le_bytes([
+                self.dict[at],
+                self.dict[at + 1],
+                self.dict[at + 2],
+                self.dict[at + 3],
+            ]) == read4(src, ip)
+        } else {
+            let at = (candidate - self.current) as usize;
+            at < ip && read4(src, at) == read4(src, ip)
+        }
+    }
+
+    /// Match length (beyond `MIN_MATCH`) when the candidate starts in the history: count to the
+    /// end of the history, then continue from the beginning of this block, as the reference does.
+    fn count_across(&self, src: &[u8], match_at: u32, ip: usize, matchlimit: usize) -> usize {
+        let d = (match_at - self.base) as usize;
+        let limit = (ip + (self.dict.len() - d)).min(matchlimit);
+        let mut len = 0usize;
+        while ip + MIN_MATCH + len < limit
+            && self.dict[d + MIN_MATCH + len] == src[ip + MIN_MATCH + len]
+        {
+            len += 1;
+        }
+        if ip + MIN_MATCH + len == limit {
+            // the match reached the end of the history: it continues with the block's start
+            len += count_match(src, ip + MIN_MATCH + len, 0, matchlimit);
+        }
+        len
+    }
+
+    /// The reference's `ip-1` probe, with the history dimension.
+    fn next_match(&mut self, src: &[u8], ip: usize, start: u32) -> Option<u32> {
+        let h = hash::<false>(src, ip);
+        let current = start + ip as u32;
+        let h_prev = hash::<false>(src, ip - 1);
+        let prev = self.table[h_prev as usize];
+        self.table[h_prev as usize] = current - 1;
+
+        let ctx = prev.wrapping_add(1);
+        let candidate =
+            if ctx < current && ctx + MAX_DISTANCE as u32 >= current && self.match8(src, ctx, ip) {
+                ctx
+            } else {
+                self.table[h as usize]
+            };
+        self.table[h as usize] = current;
+        self.is_match(src, candidate, current, ip)
+            .then_some(candidate)
+    }
+
+    /// 8 bytes at index `index` (history or block) against the block at `ip`.
+    fn match8(&self, src: &[u8], index: u32, ip: usize) -> bool {
+        if index < self.current {
+            let at = (index - self.base) as usize;
+            index >= self.base
+                && at + 8 <= self.dict.len()
+                && read8(&self.dict, at) == read8(src, ip)
+        } else {
+            let at = (index - self.current) as usize;
+            at < ip && read8(src, at) == read8(src, ip)
+        }
+    }
+
+    /// Append the block to the history and keep the window: drop the oldest bytes and shift
+    /// every index by the same delta, which preserves all distances.
+    fn advance(&mut self, src: &[u8]) {
+        self.current += src.len() as u32;
+        self.dict.extend_from_slice(src);
+        let excess = self.dict.len().saturating_sub(MAX_DISTANCE);
+        if excess == 0 {
+            debug_assert_eq!(self.current, self.base + self.dict.len() as u32);
+            return;
+        }
+        self.dict.drain(..excess);
+        self.base += excess as u32;
+        self.current -= excess as u32;
+        let delta = excess as u32;
+        for e in self.table.iter_mut() {
+            *e = if *e < delta { 0 } else { *e - delta };
+        }
+        debug_assert_eq!(self.current, self.base + self.dict.len() as u32);
+    }
+}
+
+/// Where the reference starts a dictionary stream: it advances the offset by one window
+/// (`LZ4_loadDict` does `currentOffset += 64 KB`), which is what makes index 0 usable as empty.
+const HISTORY_START: u32 = 1 << 16;
+
 // ---------------------------------------------------------------- encoder helpers
 
 /// Write cursor into the destination block. `at` stays within `compress_bound`,

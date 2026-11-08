@@ -71,3 +71,7 @@ head -c 40000 "$here/tests/fixtures/frame/large.raw" > "$here/tests/fixtures/fra
 "$out" frame-dict "$here/tests/fixtures/frame/dict.bin"     "$here/tests/fixtures/text.raw" "$here/tests/fixtures/frame/text-dict.lz4"
 printf '%-16s %s
 ' "text-dict" "$(wc -c < "$here/tests/fixtures/frame/text-dict.lz4")"
+# the dictionary case the block encoder is verified for (loadDict + one block)
+"$out" blockdict "$here/tests/fixtures/frame/dict.bin"     "$here/tests/fixtures/text.raw" "$here/tests/fixtures/frame/text-dict-block.lz4"
+printf '%-16s %s
+' "text-dict-block" "$(wc -c < "$here/tests/fixtures/frame/text-dict-block.lz4")"
