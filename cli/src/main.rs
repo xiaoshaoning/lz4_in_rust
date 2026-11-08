@@ -363,6 +363,13 @@ fn declared_len(cmd: &Cmd) -> Option<u64> {
 
 /// Compress the input into a frame, one batch of blocks at a time.
 fn compress_stream(cmd: &Cmd) -> Result<(), String> {
+    if cmd.opts.block_mode == frame::BlockMode::Linked && !cmd.quiet {
+        // docs/DESIGN.md §11: the extDict encoder that would let blocks reference each other
+        // is not ported yet, so the frame says "linked" and its blocks stay independent
+        eprintln!(
+            "lz4r: note: -BD marks the frame as linked, but blocks do not reference each other yet"
+        );
+    }
     if cmd.dictionary.is_some() {
         return Err(
             "compressing with a dictionary (-D) is not ported yet; it decodes fine".to_string(),

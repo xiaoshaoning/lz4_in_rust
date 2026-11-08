@@ -55,6 +55,11 @@ pub enum BlockMode {
     /// Each block stands alone: what `lz4` writes by default, and what the pool needs.
     Independent,
     /// A block may reference the 64 KiB before it: better ratio, serial decoding.
+    ///
+    /// **Encoding this is not ported yet** (docs/DESIGN.md §11): a frame we *write* with this
+    /// mode is valid and says "linked", but its blocks do not actually reference each other,
+    /// so the ratio equals [`BlockMode::Independent`]. Decoding linked frames, including
+    /// dictionary ones, works.
     Linked,
 }
 

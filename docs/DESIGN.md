@@ -393,3 +393,77 @@ CLI 默认行为对我们更有利。大机（≥ 5 核）仍与参考同式。
 这里不重复，只保留一条判断：纯 safe 的上限（§5）和 frame 落地前的结构债（`level` 模块、
 `compress_each`）都已处理，剩下的都是 E1–E6 的工程项与 M3/M4b/M5 的里程碑。
 
+
+## 11. M4d 编码半边：用字典压缩 / 让 linked 帧真的链接（设计与计划）
+
+**目标**：`frame` 的 `BlockMode::Linked` 真正跨块引用，`lz4r -D dict -1 file` 与
+`lz4 -D dict -1 file` 输出**逐字节相同**。解码半边已完成（§4/§10），所以这一半只关乎写。
+
+### 为什么不能"顺手加个参数"
+
+参考实现的字典压缩是**有状态**的：`LZ4_loadDict` 把字典的位置灌进哈希表、`currentOffset`
+前移 64 KiB，之后每个块都用同一个 `LZ4_stream_t` 调 `LZ4_compress_fast_continue`；块的候选
+可能落在**两个缓冲区**（字典 / 当前前缀），索引空间靠 `dictBase = dictionary + dictSize - startIndex`
+的偏移换算统一。我们的 `block::compress_into` 是**无状态**的（每次新建表），所以这不是加参数，
+而是新增一种编码器。
+
+### 接口（先写接口注释，再实现）
+
+```rust
+// block.rs
+pub struct Encoder { /* 哈希表 + 字典状态，相当于 LZ4_stream_t */ }
+impl Encoder {
+    pub fn new(acceleration: u32) -> Encoder;
+    /// `LZ4_loadDict`：只保留最后 64 KiB，位置索引从 currentOffset 起。
+    pub fn load_dict(&mut self, dict: &[u8]);
+    /// `LZ4_compress_fast_continue`：压缩一个块，可引用字典 / 之前压过的块。
+    /// 返回压缩大小；调用方负责把它们按序写出。
+    pub fn compress_into(&mut self, src: &[u8], dst: &mut [u8]) -> Result<usize, Error>;
+}
+```
+
+`frame::Encoder` 在 `BlockMode::Linked` 时持有这个 `block::Encoder`，每压完一块就把该块的
+最后 64 KiB 交给 `load_dict`（参考实现是让 `dictEnd == source` 走 `withPrefix64k` 的快捷路径；
+我们的块来自不同的 `Vec`，所以走 `usingExtDict`，与 C 的 `LZ4F_compressBlock_continue` 同路径）。
+
+### 要移植的 C 函数（按依赖顺序）
+
+1. `LZ4_renormDictT`（`currentOffset` 逼近 2 GiB 时重整表）——只在超长输入时才触发，但**必须**
+   一致，否则索引不同、输出不同。
+2. `LZ4_loadDict_internal`（`_ld_fast`）：`resetStream` → `currentOffset += 64 KiB` →
+   循环 `p += 3` 写表。
+3. `LZ4_compress_generic` 的 `usingExtDict` 维度：
+   - 前缀/字典两套 `match` 定位与 `lowLimit`；
+   - 匹配在字典里时"数到字典末尾再从前缀继续数"（`matchLength` 的双段计数）；
+   - `_next_match` 的 `inDict` 分支与 8 字节预检的字典边界；
+   - `prefixIdxLimit` / `dictSmall`（字典 < 4 字节或表项早于窗口时跳过）。
+4. `LZ4_compress_fast_continue` 的状态推进：`dictSize += inputSize`、`currentOffset += inputSize`、
+   以及"输入与字典重叠"的裁剪（frame 层不会重叠，可 assert）。
+5. HC 侧（levels 3..=12 的 linked）：`LZ4HC_InsertAndGetWiderMatch` 的 `usingExtDict` /
+   `usingDictCtx` 分支 + `LZ4HC_Insert` 的跨缓冲区插入。**这是第二个大块**，建议与第 3 步分开做。
+
+### 不可省略的取舍
+
+- **linked 模式无法用 `par`**：块之间有依赖，必须串行。CLI 在 `-BD` + `-T#` 时的行为要与参考一致
+  （`lz4` 本身把 workers 降为 0）。
+- 逐字节相同意味着不能"改进" extDict 的候选顺序；和 HC 一样，接受"永远跟随 C"。
+
+### 验证计划（先建 oracle，再写代码）
+
+1. `c_oracle blockdict <level> <dict> <in> <out>`：`LZ4_loadDict` + 一次
+   `LZ4_compress_fast_continue`（首块即字典块）。
+2. `c_oracle blockdict2 <dict> <in> <out>`：`loadDict` 后**连续压两个块**（第二块靠历史），
+   用来锁住状态推进。
+3. 帧级：`c_oracle frame-dict`（已存在）产出的 fixture，要求我们的 linked 帧与它**逐字节相同**；
+   再在 fuzz 里加"随机字典 + 随机数据"的一轮。
+4. 失败模式：字典不足 4 字节、字典 > 64 KiB、块 < 13 字节、块与字典完全无匹配。
+
+### 分两步落地
+
+| 步 | 内容 | 判据 |
+|---|---|---|
+| A | fast 档（level 1）的 extDict 编码器 + frame 的 linked 写路径（fast 档） | 与 `frame-dict` fixture 及 `blockdict*` 逐字节相同 |
+| B | HC 档（2..12）的 extDict 搜索 | 同上，用 `-BD -9` 的 fixture |
+
+在 A、B 都完成之前，`-BD` 写出的帧**仍然不会跨块引用**（帧合法、`lz4` 能解，只是没吃到
+linked 的收益），CLI 会就这件事给一句提示。
