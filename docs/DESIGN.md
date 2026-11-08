@@ -452,8 +452,10 @@ impl Encoder {
 
 1. `c_oracle blockdict <level> <dict> <in> <out>`：`LZ4_loadDict` + 一次
    `LZ4_compress_fast_continue`（首块即字典块）。
-2. `c_oracle blockdict2 <dict> <in> <out>`：`loadDict` 后**连续压两个块**（第二块靠历史），
-   用来锁住状态推进。
+2. 跨块状态推进的判据只能是**真帧**：`lz4 -BD`（或 `c_oracle frame 1 4 1 0 1 0`）产出的多块
+   linked 帧。不能自己拼"`loadDict` + 两个不连续缓冲区"的 oracle：那样 `cctx->dictSize` 会超过字典
+   缓冲区的长度，`dictEnd` 指到分配之外，C 自己就在读越界内存（曾用 `blockdict2` 做过，输出 3902
+   字节，不是有效参考）。
 3. 帧级：`c_oracle frame-dict`（已存在）产出的 fixture，要求我们的 linked 帧与它**逐字节相同**；
    再在 fuzz 里加"随机字典 + 随机数据"的一轮。
 4. 失败模式：字典不足 4 字节、字典 > 64 KiB、块 < 13 字节、块与字典完全无匹配。

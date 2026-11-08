@@ -482,9 +482,9 @@ fn read_extension(src: &[u8], ip: &mut usize) -> Result<usize, Error> {
 pub struct Encoder {
     /// The `byU32` table (the reference uses only this table type with a dictionary).
     table: [u32; TABLE_SIZE],
-    /// History bytes; a table entry `i` refers to `dict[(i - base)]`.
-    dict: Vec<u8>,
-    /// Index of `dict[0]`.
+    /// History bytes, oldest first: a table entry `i` refers to `history[i - base]`.
+    history: Vec<u8>,
+    /// Index of `history[0]`.
     base: u32,
     /// Index just past the history (the reference's `currentOffset`).
     current: u32,
@@ -492,11 +492,12 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    /// A fresh encoder with no history.
+    /// A fresh encoder with no history. `acceleration` below 1 counts as 1, as the reference's
+    /// `LZ4_compress_fast` does.
     pub fn new(acceleration: u32) -> Encoder {
         Encoder {
             table: [0; TABLE_SIZE],
-            dict: Vec::new(),
+            history: Vec::new(),
             base: HISTORY_START,
             current: HISTORY_START,
             acceleration: acceleration.max(1),
@@ -512,19 +513,23 @@ impl Encoder {
         if dict.len() < 8 {
             return;
         }
-        self.dict
+        self.history
             .extend_from_slice(&dict[dict.len().saturating_sub(MAX_DISTANCE)..]);
-        self.base = self.current - self.dict.len() as u32;
+        self.base = self.current - self.history.len() as u32;
         // the reference fills the table every 3 bytes
         let mut i = 0usize;
-        while i + 8 <= self.dict.len() {
-            let h = hash::<false>(&self.dict, i) as usize;
+        while i + 8 <= self.history.len() {
+            let h = hash::<false>(&self.history, i) as usize;
             self.table[h] = self.base + i as u32;
             i += 3;
         }
     }
 
     /// `LZ4_compress_fast_continue`: compress one block, referencing the history.
+    ///
+    /// Returns the number of bytes written to `dst`, which must hold
+    /// [`compress_bound`]`(src.len())`; the block becomes part of the history afterwards, so the
+    /// next call may reference it.
     pub fn compress_into(&mut self, src: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
         let bound = compress_bound(src.len());
         if dst.len() < bound {
@@ -591,12 +596,10 @@ impl Encoder {
                 let low = if match_at < start { self.base } else { start };
                 while ip > anchor && match_at > low {
                     // the byte *before* each side, as the reference compares `ip[-1]`/`match[-1]`
-                    let earlier = if match_at < start {
-                        self.dict[(match_at - self.base) as usize - 1]
-                    } else {
-                        src[(match_at - start) as usize - 1]
-                    };
-                    if earlier != src[ip - 1] {
+                    let (buf, at) = self
+                        .seg(src, match_at - 1)
+                        .expect("above `low`, so inside the window");
+                    if buf[at] != src[ip - 1] {
                         break;
                     }
                     ip -= 1;
@@ -654,8 +657,24 @@ impl Encoder {
         Ok(out.at)
     }
 
+    /// An index as `(bytes, offset into them)`, or `None` when it is outside the window.
+    ///
+    /// This is *the* mapping from the offset space to memory, and the only place that knows a
+    /// candidate below the block's start lives in the history. Keeping it in one function is
+    /// what makes the rest of the encoder readable: every other routine asks here.
+    fn seg<'a>(&'a self, src: &'a [u8], index: u32) -> Option<(&'a [u8], usize)> {
+        if index < self.current {
+            if index < self.base {
+                return None; // fell out of the window
+            }
+            Some((&self.history, (index - self.base) as usize))
+        } else {
+            Some((src, (index - self.current) as usize))
+        }
+    }
+
     /// The candidate test shared by the search loop: same 4 bytes, close enough, and inside
-    /// the history we still hold.
+    /// the window we still hold.
     #[inline]
     fn is_match(&self, src: &[u8], candidate: u32, current: u32, ip: usize) -> bool {
         if candidate == 0 || candidate >= current {
@@ -664,32 +683,22 @@ impl Encoder {
         if candidate + (MAX_DISTANCE as u32) < current {
             return false; // too far to encode
         }
-        if candidate < self.current {
-            // in the history
-            if candidate < self.base {
-                return false; // fell out of the window
-            }
-            let at = (candidate - self.base) as usize;
-            u32::from_le_bytes([
-                self.dict[at],
-                self.dict[at + 1],
-                self.dict[at + 2],
-                self.dict[at + 3],
-            ]) == read4(src, ip)
-        } else {
-            let at = (candidate - self.current) as usize;
-            at < ip && read4(src, at) == read4(src, ip)
+        match self.seg(src, candidate) {
+            // fewer than 4 bytes left before the end of the history: the reference reads on into
+            // whatever follows the dictionary, which a safe port cannot reproduce, so such a
+            // candidate is treated as no match
+            Some((buf, at)) if at + 4 <= buf.len() => read4(buf, at) == read4(src, ip),
+            _ => false,
         }
     }
 
     /// Match length (beyond `MIN_MATCH`) when the candidate starts in the history: count to the
     /// end of the history, then continue from the beginning of this block, as the reference does.
     fn count_across(&self, src: &[u8], match_at: u32, ip: usize, matchlimit: usize) -> usize {
-        let d = (match_at - self.base) as usize;
-        let limit = (ip + (self.dict.len() - d)).min(matchlimit);
+        let (hist, d) = self.seg(src, match_at).expect("caller found a match");
+        let limit = (ip + (hist.len() - d)).min(matchlimit);
         let mut len = 0usize;
-        while ip + MIN_MATCH + len < limit
-            && self.dict[d + MIN_MATCH + len] == src[ip + MIN_MATCH + len]
+        while ip + MIN_MATCH + len < limit && hist[d + MIN_MATCH + len] == src[ip + MIN_MATCH + len]
         {
             len += 1;
         }
@@ -720,43 +729,56 @@ impl Encoder {
             .then_some(candidate)
     }
 
-    /// 8 bytes at index `index` (history or block) against the block at `ip`.
+    /// 8 bytes at `index` (history or block) against the block at `ip`.
     fn match8(&self, src: &[u8], index: u32, ip: usize) -> bool {
-        if index < self.current {
-            let at = (index - self.base) as usize;
-            index >= self.base
-                && at + 8 <= self.dict.len()
-                && read8(&self.dict, at) == read8(src, ip)
-        } else {
-            let at = (index - self.current) as usize;
-            at < ip && read8(src, at) == read8(src, ip)
+        // 8 readable bytes at the candidate; overlapping `ip` is fine, the reference allows it
+        // (a candidate at `ip - 1` reads across). Callers guarantee the candidate is in the past.
+        match self.seg(src, index) {
+            Some((buf, at)) if at + 8 <= buf.len() => read8(buf, at) == read8(src, ip),
+            _ => false,
         }
     }
 
-    /// Append the block to the history and keep the window: drop the oldest bytes and shift
-    /// every index by the same delta, which preserves all distances.
+    /// Append the block to the history and drop the oldest bytes, shifting every index by the
+    /// same delta — which preserves all distances, so no decision changes.
+    ///
+    /// There are two reasons to drop bytes, and they are one operation: the window is full (the
+    /// reference's `LZ4_renormDictT`), or the offset space is nearly used up (the reference calls
+    /// the same function for that, at `2^31`). Without the second, a stream longer than 2 GiB
+    /// would overflow `current`.
     fn advance(&mut self, src: &[u8]) {
         self.current += src.len() as u32;
-        self.dict.extend_from_slice(src);
-        let excess = self.dict.len().saturating_sub(MAX_DISTANCE);
-        if excess == 0 {
-            debug_assert_eq!(self.current, self.base + self.dict.len() as u32);
+        self.history.extend_from_slice(src);
+
+        let delta = self
+            .history
+            .len()
+            .saturating_sub(MAX_DISTANCE)
+            .max(self.current.saturating_sub(RENORM_AT) as usize);
+        if delta == 0 {
             return;
         }
-        self.dict.drain(..excess);
-        self.base += excess as u32;
-        self.current -= excess as u32;
-        let delta = excess as u32;
+        debug_assert!(
+            delta as u32 <= self.base,
+            "the window never starts before index 0"
+        );
+        self.history.drain(..delta);
+        self.base -= delta as u32;
+        self.current -= delta as u32;
         for e in self.table.iter_mut() {
-            *e = (*e).saturating_sub(delta);
+            *e = (*e).saturating_sub(delta as u32);
         }
-        debug_assert_eq!(self.current, self.base + self.dict.len() as u32);
+        debug_assert_eq!(self.current, self.base + self.history.len() as u32);
     }
 }
 
 /// Where the reference starts a dictionary stream: it advances the offset by one window
 /// (`LZ4_loadDict` does `currentOffset += 64 KB`), which is what makes index 0 usable as empty.
-const HISTORY_START: u32 = 1 << 16;
+const HISTORY_START: u32 = MAX_DISTANCE as u32 + 1;
+
+/// The reference renumbers its offsets once they pass `2^31` (`LZ4_renormDictT`), keeping them
+/// in a `u32` that a long stream would otherwise overflow.
+const RENORM_AT: u32 = 0x8000_0000;
 
 // ---------------------------------------------------------------- encoder helpers
 

@@ -248,3 +248,19 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
 4. **`Error` 保持单一枚举、`Copy`、`PartialEq`**：调用方一个 `?`，测试可以直接 `assert_eq!`。
    （frame 的 IO 错误走泛型 `E: From<Error>`，不要把 `io::Error` 塞进这个枚举——那样会失去
    `Copy`/`PartialEq`。）
+
+## 第 9 轮：M4d A 步新增代码（`block::Encoder`、`frame::compress` 改道、oracle 新命令）
+
+按《A Philosophy of Software Design》的红旗清单过了一遍，修掉的按"根因"归并：
+
+| # | 红旗 | 位置 | 处置 |
+|---|---|---|---|
+| R40 | Repetition / Information leakage | `block.rs` `Encoder`：把"偏移 → 内存"的映射（`candidate < start` ? 历史 : 本块；`index - base`）**抄了 5 份**（`is_match`、`count_across`、`match8`、回退扩展、`next_match`） | 收敛成一个 `seg() -> Option<(&[u8], usize)>`，其它地方一律问它。上一轮三个 bug 全出在这 5 份副本的算术上，这就是根因 |
+| R41 | 潜在 panic（unknown unknown） | `match8` 先算 `index - base` 再判 `index >= base`；表里留一条过期项、debug 构建下就会 panic | 顺序交给 `seg()`（先判窗口再算偏移） |
+| R42 | 正确性（>2 GiB 流） | `advance()` 只在窗口满时重编号，`current` 会一直涨到溢出 u32；C 的 `renormDictT` 在 2^31 就重编号 | 一次位移、两个理由（窗口满 / 偏移空间用掉一半），并加 `debug_assert` 守住 `base >= delta` |
+| R43 | Vague name | 字段 `dict` 装的其实是**历史**（可能是上一个块），而 crate 里 `with_dict`/`-D` 才是"字典" | 改名 `history`；`load_dict` 保留（对应 C 的 API 名） |
+| R44 | Comment repeats code / 名字与事实不符 | `/// Index of dict[0]`（改名后过时）；`frame::compress` 的文档声称 fixture 覆盖了"linked 路径"（并没有） | 都按事实重写 |
+| R45 | 未文档化的接口契约 | `Encoder::compress_into` 没说 `dst` 容量要求和"块会变成历史"；`new` 没说 acceleration 会被夹到 1 | 补接口注释（Before-implementation 的那种） |
+| R46 | 误导性工具（工具即文档） | `c_oracle blockdict2` 把"字典"和"两个块"放在不同缓冲区，`dictSize` 涨过字典长度后 C 读越界内存 | 删掉该模式；`DESIGN.md` §11 写明跨块判据只能用真帧，并记下为什么 |
+| R47 | Overexposure（**未处置，需要决定**） | `block::Encoder` 是 `pub`，但主路径（历史累积）已知不正确 | 三个选项：(a) 做完它；(b) 从库里删掉（git 里有，`535b5d1`）；(c) 现状。`pub(crate)` 不可行——没人用就是 dead code，CI 的 `-D warnings` 不过。建议在 0.2.0 之前 (a) 或 (b)，不要带着一个"知道不对的公共 API"发版 |
+| R48 | 与 C 的已知分歧（**未处置**） | 历史末尾不足 4/8 字节的候选：C 会读过字典缓冲区末尾（未定义），安全 Rust 只能判为"不匹配" | 已在代码注释里写明；接进 frame 层之前要在 `DESIGN.md` 里定案（这会影响 linked 帧的逐字节相同性） |

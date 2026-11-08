@@ -194,32 +194,6 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    if (argc == 6 && strcmp(argv[1], "blockdict2") == 0) {
-        /* Two consecutive blocks: the second one references the first through the state. */
-        static LZ4_stream_t stream;
-        unsigned char* dict;
-        size_t dictSize;
-        char* dst;
-        int bound, csize, csize2;
-        size_t half;
-        dict = slurp(argv[2], &dictSize);
-        src = slurp(argv[3], &srcSize);
-        half = srcSize / 2;
-        bound = LZ4_compressBound((int)(srcSize - half));
-        dst = (char*)malloc((size_t)bound);
-        if (!dst) { return 2; }
-        if (LZ4_loadDict(&stream, (const char*)dict, (int)dictSize) < 0) { return 1; }
-        csize = LZ4_compress_fast_continue(&stream, (const char*)src, dst, (int)half, bound, 1);
-        if (csize <= 0) { fprintf(stderr, "blockdict2 first failed%c", 10); return 1; }
-        spit(argv[4], dst, (size_t)csize);
-        csize2 = LZ4_compress_fast_continue(&stream, (const char*)src + half,
-                                           dst, (int)(srcSize - half), bound, 1);
-        if (csize2 <= 0) { fprintf(stderr, "blockdict2 second failed%c", 10); return 1; }
-        spit(argv[5], dst, (size_t)csize2);
-        free(dst); free(src); free(dict);
-        return 0;
-    }
-
     if (argc == 4 && strcmp(argv[1], "unframe") == 0) {
         LZ4F_dctx* dctx = NULL;
         size_t pos = 0, len = 0, cap, hint = 1;

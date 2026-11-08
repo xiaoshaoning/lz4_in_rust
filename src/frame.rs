@@ -372,8 +372,8 @@ fn write_block<W: Write>(out: &mut W, raw: &[u8], packed: &[u8], opts: &Opts) ->
 
 /// Compress a whole buffer into one frame: the same writer, into a `Vec`.
 ///
-/// Thin layering on purpose — every frame this port writes goes through [`Encoder`], so the
-/// byte-identity fixtures cover the streaming path and the linked path alike.
+/// Layered on [`Encoder`] on purpose: one block writer means the byte-identity fixtures cover
+/// [`compress`] and the streaming API alike, and cannot drift apart.
 pub fn compress(src: &[u8], opts: &Opts) -> Result<Vec<u8>, Error> {
     let declared = if opts.content_size {
         Some(src.len() as u64)
@@ -386,9 +386,13 @@ pub fn compress(src: &[u8], opts: &Opts) -> Result<Vec<u8>, Error> {
 }
 
 /// Recover a codec error from the `io::Error` the frame layer wrapped it in.
+///
+/// The fallback is unreachable from here: this writer is a `Vec`, whose `write` cannot fail, so
+/// the only errors that can surface are the codec errors (bad options) created below and wrapped
+/// as `io::Error`s.
 fn from_io(e: io::Error) -> Error {
     match e.get_ref() {
-        Some(inner) if inner.is::<Error>() => *inner.downcast_ref::<Error>().expect("checked"),
+        Some(inner) if inner.is::<Error>() => *inner.downcast_ref::<Error>().expect("just checked"),
         _ => Error::Unsupported("frame write failed"),
     }
 }
