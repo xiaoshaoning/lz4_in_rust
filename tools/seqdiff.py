@@ -66,11 +66,13 @@ def main():
         print(__doc__.strip())
         return 2
     ref_path, our_path = sys.argv[1], sys.argv[2]
-    ref = sequences(open(ref_path, "rb").read())
-    ours = sequences(open(our_path, "rb").read())
+    ref_bytes = open(ref_path, "rb").read()
+    our_bytes = open(our_path, "rb").read()
+    ref = sequences(ref_bytes)
+    ours = sequences(our_bytes)
 
-    print(f"reference: {len(ref)} sequences, {len(open(ref_path, 'rb').read())} bytes")
-    print(f"ours     : {len(ours)} sequences, {len(open(our_path, 'rb').read())} bytes")
+    print(f"reference: {len(ref)} sequences, {len(ref_bytes)} bytes")
+    print(f"ours     : {len(ours)} sequences, {len(our_bytes)} bytes")
 
     for i, (r, o) in enumerate(zip(ref, ours)):
         if r != o:

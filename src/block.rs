@@ -468,9 +468,10 @@ fn read_extension(src: &[u8], ip: &mut usize) -> Result<usize, Error> {
 /// Indices are the reference's: an absolute offset that grows with every byte compressed, with
 /// the history occupying `[current - history.len(), current)`. Only the last 64 KiB of history
 /// is kept; dropping older bytes renumbers every index by the same delta, which preserves every
-/// distance and therefore every decision. `dict_size` is deliberately *not* renumbered — it is
-/// the reference's `dictSize`, which only the `dictSmall` rule reads (and that rule can only
-/// fire before anything was dropped).
+/// distance and therefore every decision.
+///
+/// A caller-supplied dictionary becomes history too ([`Encoder::load_dict`]), which is the prefix
+/// mode the reference's frame layer uses for `lz4 -BD -D`.
 pub(crate) struct Encoder {
     /// The `byU32` table, which is what the reference uses for streams.
     table: [u32; TABLE_SIZE],
@@ -480,8 +481,6 @@ pub(crate) struct Encoder {
     base: u32,
     /// Index just past the history: where the next block starts.
     current: u32,
-    /// The reference's `dictSize`: bytes compressed since the stream began (never renumbered).
-    dict_size: u64,
     acceleration: u32,
 }
 
@@ -493,7 +492,6 @@ impl Encoder {
             history: Vec::new(),
             base: HISTORY_START,
             current: HISTORY_START,
-            dict_size: 0,
             acceleration: acceleration.max(1),
         }
     }
@@ -512,7 +510,6 @@ impl Encoder {
         self.history.extend_from_slice(tail);
         self.base = HISTORY_START - self.history.len() as u32;
         self.current = HISTORY_START;
-        self.dict_size = self.history.len() as u64;
         let mut i = 0usize;
         while i + 8 <= self.history.len() {
             let h = hash::<false>(&self.history, i) as usize;
@@ -549,9 +546,11 @@ impl Encoder {
         // the reference's `lowLimit` for prefix mode, which allows every distance up to
         // `MAX_DISTANCE` and nothing further.
         //
-        // The reference's other guard here (`LZ4_isDictSmall`, which rejects stale table entries
-        // when the history is shorter than the window) cannot fire on this path: it needs a
-        // partial *loaded* dictionary, and `load_dict` is not ported (docs/DESIGN.md §11).
+        // The reference has a second guard here, `LZ4_isDictSmall`, which rejects table entries
+        // that fall outside a partially loaded dictionary. It is not ported because it is not
+        // needed: those entries are the zeroed slots (and, later, dropped ones), and `seg()` answers
+        // `None` for every index below `base` — the same rejection, decided in one place. The
+        // fixtures settle it: a 40 KB and a 64 KB dictionary both reproduce the reference's bytes.
         let start = self.current;
         let low = self.base.saturating_sub(1);
 
@@ -675,11 +674,10 @@ impl Encoder {
         self.table[h_prev as usize] = current - 1;
 
         let ctx = prev.wrapping_add(1);
-        let in_history = ctx < start;
-        let ctx_ok = ctx + (MAX_DISTANCE as u32) >= current
-            // the eight compared bytes must be inside the history, not straddle the boundary
-            && (!in_history || ctx + 8 <= start)
-            && self.match8_at(src, ctx, ip);
+        // `match8_at` already refuses a candidate whose eight bytes would leave the history, which
+        // *is* the reference's "the eight compared bytes sit inside the dictionary", so that
+        // condition is not restated here.
+        let ctx_ok = ctx + (MAX_DISTANCE as u32) >= current && self.match8_at(src, ctx, ip);
         let candidate = if ctx_ok { ctx } else { self.table[h as usize] };
         self.table[h as usize] = current;
 
@@ -723,10 +721,9 @@ impl Encoder {
     ///
     /// Two reasons to drop bytes, one operation: the window is full (the reference's
     /// `LZ4_renormDictT`), or the offset space is nearly used up (the reference renumbers for that
-    /// at 2^31). `dict_size` keeps counting regardless, because the `dictSmall` rule reads it.
+    /// at 2^31).
     fn advance(&mut self, src: &[u8]) {
         self.current += src.len() as u32;
-        self.dict_size += src.len() as u64;
         self.history.extend_from_slice(src);
 
         let delta = self

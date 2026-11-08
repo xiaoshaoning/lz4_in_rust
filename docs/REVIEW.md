@@ -388,3 +388,18 @@ fixture + fuzz 守着。
 
 **看过不改的**：`hash::<BY_U16>` 两种表形（逐字节相同的前提）；`decompress_impl` 的快循环 / 检查路径切分
 （`DESIGN.md` §2 的设计，性能与安全的来源）；`Out` 的"入口检查一次容量、之后不再检查"（有文档说明）。
+
+## 第 15 轮：`-D` 编码那一版代码（`block::Encoder`、`frame::Encoder::with_dict`、CLI 接线）
+
+新写的代码先自查一遍红旗，发现的都是"同一件事写了两遍"和"写了没人读的状态"：
+
+| # | 红旗 | 位置 | 处置 |
+|---|---|---|---|
+| R65 | 死状态 | `Encoder.dict_size`：`LZ4_isDictSmall` 那套没移植，这个字段就只剩写入、没有任何读取 —— 留着会让读者以为规则实现了 | 删掉；"为什么不需要 `dictSmall`"的论证搬到 `compress_into` 里该守卫的位置 |
+| R66 | Repetition（一条规则两处） | "能不能用字典"判断了两次：`with_dict` 里两个 `if`，`linked_encoder` 里又用同一个谓词决定 `None` | 提成 `dictionary_encoder(opts, dict) -> Result<_, &'static str>`，`build` 只调用它；写入与报错不可能再不一致 |
+| R67 | Repetition | `compress` 与 `compress_with_dict` 的 5 行 io 管线完全一样，只差构造函数 | 一个私有 `compress_via(src, opts, Option<&[u8]>)`，两个公开函数各一行 |
+| R68 | 条件重复 | `probe` 里 `ctx + 8 <= start` 与 `match8_at` 内部"八个字节必须在历史内"是同一个界（`at + 8 <= history.len()` ⇔ `ctx + 8 <= start`） | 删掉显式那条，只留一个地方判定，并写明它*就是*参考实现的词典边界规则 |
+| R69 | 小噪音 | `tools/seqdiff.py` 为了打印字节数把两个文件各读了两遍 | 各读一次 |
+
+**看过不改的**：`Encoder` 的两个构造入口（`new` 无字典 / `load_dict` 后挂字典）与一个 `build` ——
+这是"常见情况最简单"的形状，合并只会让 `new` 多一个没人用的参数。

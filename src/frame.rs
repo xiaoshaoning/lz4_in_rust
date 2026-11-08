@@ -126,6 +126,22 @@ fn linked_encoder(opts: &Opts) -> Option<crate::block::Encoder> {
         .then(|| crate::block::Encoder::new(1))
 }
 
+/// The stateful encoder a dictionary needs, or the reason this frame cannot have one.
+///
+/// The two refusals are the two mechanisms that are not ported (docs/DESIGN.md §11), decided here
+/// once, so the writer and the message cannot disagree.
+fn dictionary_encoder(opts: &Opts, dict: &[u8]) -> Result<crate::block::Encoder, &'static str> {
+    if opts.block_mode != BlockMode::Linked {
+        return Err("compressing with a dictionary needs linked blocks (-BD) for now");
+    }
+    if !opts.level.is_fast() {
+        return Err("compressing with a dictionary is ported for level 1 only");
+    }
+    let mut enc = crate::block::Encoder::new(1);
+    enc.load_dict(dict);
+    Ok(enc)
+}
+
 impl Default for Opts {
     fn default() -> Self {
         Opts {
@@ -266,16 +282,6 @@ impl<W: Write> Encoder<W> {
         content_len: Option<u64>,
         dict: &[u8],
     ) -> io::Result<Self> {
-        if opts.block_mode != BlockMode::Linked {
-            return Err(unsupported(
-                "compressing with a dictionary needs linked blocks (-BD) for now",
-            ));
-        }
-        if !opts.level.is_fast() {
-            return Err(unsupported(
-                "compressing with a dictionary is ported for level 1 only",
-            ));
-        }
         Self::build(out, opts, content_len, Some(dict))
     }
 
@@ -308,10 +314,10 @@ impl<W: Write> Encoder<W> {
         // Enough blocks for the policy's "is multi-threading worth it" gate to answer.
         let workers = par::plan(&pool, opts.block_size * par::BLOCKS_PER_WORKER).workers;
 
-        let mut linked = linked_encoder(opts);
-        if let (Some(dict), Some(enc)) = (dict, linked.as_mut()) {
-            enc.load_dict(dict);
-        }
+        let linked = match dict {
+            Some(dict) => Some(dictionary_encoder(opts, dict).map_err(unsupported)?),
+            None => linked_encoder(opts),
+        };
 
         let (desc, len) = descriptor(opts, declared);
         let hc = header_checksum(&desc[..len]);
@@ -457,24 +463,26 @@ fn write_block<W: Write>(out: &mut W, raw: &[u8], packed: &[u8], opts: &Opts) ->
 /// Layered on [`Encoder`] on purpose: one block writer means the byte-identity fixtures cover
 /// [`compress`] and the streaming API alike, and cannot drift apart.
 pub fn compress(src: &[u8], opts: &Opts) -> Result<Vec<u8>, Error> {
-    let declared = if opts.content_size {
-        Some(src.len() as u64)
-    } else {
-        None
-    };
-    let mut enc = Encoder::new(Vec::new(), opts, declared).map_err(from_io)?;
-    enc.write_all(src).map_err(from_io)?;
-    enc.finish().map_err(from_io)
+    compress_via(src, opts, None)
 }
 
 /// [`compress`] for a frame whose blocks may reference `dict` (`lz4 -BD -D`).
 pub fn compress_with_dict(src: &[u8], opts: &Opts, dict: &[u8]) -> Result<Vec<u8>, Error> {
+    compress_via(src, opts, Some(dict))
+}
+
+fn compress_via(src: &[u8], opts: &Opts, dict: Option<&[u8]>) -> Result<Vec<u8>, Error> {
     let declared = if opts.content_size {
         Some(src.len() as u64)
     } else {
         None
     };
-    let mut enc = Encoder::with_dict(Vec::new(), opts, declared, dict).map_err(from_io)?;
+    let writer = Vec::new();
+    let mut enc = match dict {
+        Some(dict) => Encoder::with_dict(writer, opts, declared, dict),
+        None => Encoder::new(writer, opts, declared),
+    }
+    .map_err(from_io)?;
     enc.write_all(src).map_err(from_io)?;
     enc.finish().map_err(from_io)
 }
