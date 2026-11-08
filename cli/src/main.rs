@@ -42,7 +42,7 @@ Options:
   -t, --test         decompress and discard: check integrity only
   -f, --force        overwrite the output, allow console input/output
   -B4 .. -B7         block size: 64 KiB, 256 KiB, 1 MiB, 4 MiB (default 4 MiB)
-  -D <file>          dictionary: needed to decode a frame compressed against one
+  -D <file>          dictionary: compress (-BD) or decode a frame that used one
   -BD                blocks depend on the previous one (better ratio, no parallel decode)
   -BX                add a per-block checksum
   --no-frame-crc     no checksum of the whole content (speed, less safety)
@@ -373,11 +373,10 @@ fn compress_stream(cmd: &Cmd) -> Result<(), String> {
             cmd.opts.level.as_u8()
         );
     }
-    if cmd.dictionary.is_some() {
-        return Err(
-            "compressing with a dictionary (-D) is not ported yet; it decodes fine".to_string(),
-        );
-    }
+    let dict = match &cmd.dictionary {
+        Some(path) => Some(fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?),
+        None => None,
+    };
     let len = declared_len(cmd);
     // The reference tool shrinks the block size to the smallest one that holds the whole
     // input (LZ4F_optimalBSID): a 15 KiB file gets 64 KiB blocks even with -B7. Same ratio,
@@ -397,8 +396,12 @@ fn compress_stream(cmd: &Cmd) -> Result<(), String> {
 
     let mut input = open_input(cmd)?;
     let mut out = open_output(cmd)?;
-    let mut enc =
-        frame::Encoder::new(io::BufWriter::new(&mut out), &opts, len).map_err(|e| e.to_string())?;
+    let writer = io::BufWriter::new(&mut out);
+    let mut enc = match &dict {
+        Some(dict) => frame::Encoder::with_dict(writer, &opts, len, dict),
+        None => frame::Encoder::new(writer, &opts, len),
+    }
+    .map_err(|e| e.to_string())?;
     io::copy(&mut input, &mut enc).map_err(|e| format!("{}: {e}", describe_input(cmd)))?;
     // a Writer has no end-of-stream call: the end mark is explicit
     let mut buffered = enc.finish().map_err(|e| e.to_string())?;

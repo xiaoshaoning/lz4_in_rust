@@ -196,7 +196,9 @@ Design》的检查项（深模块 / 信息隐藏 / 错误模型 / 重复 / 命�
     （`FrameInfo.dict_id`）、从不比对，块自己决定能不能解；CLI 在"帧点名要字典而没给 `-D`"时
     补一句提示（不然用户只看到 `invalid match offset`）。`a_declared_dictionary_id_is_reported_not_enforced`
     （库）与 `a_frame_that_names_its_dictionary_says_so_when_it_is_missing`（CLI）钉住。
-  - [ ] ②' 字典**编码**：需要 block 层的状态编码器（M4d A/B 步）。
+  - [x] ②' 字典**编码**：**`-BD` + level 1 已完成**，单块与三块 fixture 都与 C 逐字节相同
+    （`frame/text-dict.lz4`、`frame/large-b4-dict.lz4`）。未做：独立块 + 字典（`usingDictCtx`）、
+    HC 档 + 字典（都要等 B 步）。请求未支持组合时由 frame 层报 `Unsupported`，CLI 原样转述。
   - [x] ③ 写 *linked* 帧时的跨块引用：**level 1 已完成**，三块 linked 帧与 C 逐字节相同
     （fixture `frame/large-b4-linked-plain.lz4`），比 independent 少 4.2%。HC 档（2..=12）仍未做
     （`DESIGN.md` §11 B 步），CLI 会在那种情况下提示"块不互相引用"。

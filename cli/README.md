@@ -19,7 +19,7 @@ lz4r -c file.txt | lz4 -d              # pipes, and interop with the reference t
 lz4r -t file.txt.lz4                   # integrity check only
 ```
 
-Supported: `-1..-12`, `-d`, `-z`, `-c`, `-t`, `-f`, `-q`, `-v`, `-B4..-B7`, `-BD`, `-BX`,
+Supported: `-1..-12`, `-d`, `-z`, `-c`, `-t`, `-f`, `-q`, `-v`, `-B4..-B7`, `-BD`, `-BX`, `-D`,
 `--no-frame-crc`, `--content-size`, `-T#` (`-T0` = auto, `-T1` = one), `--single-thread`,
 `--rm`, `-h`, `-V`, `-` for stdin/stdout, and bundled short flags (`-9f`, `-B4D`). `lz4r -h`
 prints the full list. A file holding several concatenated frames is decoded in full.
@@ -30,7 +30,10 @@ both work, and `--content-size` is refused on a stream whose length cannot be kn
 ## What it does not do yet
 
 - No `-m`/`--multiple` (directories), no `--list`, no `-b` (benchmark), no legacy `-l`
-  format. `-D` decodes only: compressing with a dictionary is not ported yet.
+  format.
+- `-D` compresses with `-BD` at level 1 only: linking is ported for the fast parser, and an
+  independent-block frame reaches its dictionary through a different mechanism. Asking for
+  anything else fails with a message instead of writing a frame that ignores the dictionary.
 - Every level `-1..-12` works and is byte-identical to the reference tool, including its
   block-size shrink for small inputs.
 

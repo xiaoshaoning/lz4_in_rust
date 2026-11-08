@@ -25,9 +25,10 @@
 //! This module owns every format detail: nothing outside needs the field layout, and nothing
 //! inside needs to know how a block is compressed.
 //!
-//! Scope: **decoding** with a dictionary is supported ([`Decoder::with_dict`]), which is what
-//! `lz4 -D` produces; *compressing* with one is not ported yet, because the reference drives
-//! that through a stateful stream context whose hash table survives across blocks. A frame that
+//! Scope: dictionaries are supported in both directions — [`Decoder::with_dict`] reads what
+//! `lz4 -D` writes, and [`Encoder::with_dict`] writes frames whose linked blocks reference one
+//! (`lz4 -BD -D`). Independent-block dictionary frames reach their dictionary through
+//! `usingDictCtx` in the reference, which is not ported. A frame that
 //! declares a `dictID` decodes like any other — the id lands in [`FrameInfo`] and, as in the
 //! reference, is never compared against the dictionary — so such a frame fails on an invalid
 //! offset unless the caller supplied the dictionary it was built with.
@@ -243,7 +244,47 @@ impl<W: Write> Encoder<W> {
     /// `content_len` is the total size the frame will hold, needed only when
     /// [`Opts::content_size`] is set: a stream that cannot seek cannot patch its own
     /// descriptor afterwards, so the size must be known now.
-    pub fn new(mut out: W, opts: &Opts, content_len: Option<u64>) -> io::Result<Self> {
+    pub fn new(out: W, opts: &Opts, content_len: Option<u64>) -> io::Result<Self> {
+        Self::build(out, opts, content_len, None)
+    }
+
+    /// Write a frame whose blocks may reference `dict` — what `lz4 -BD -D` does.
+    ///
+    /// The dictionary's last 64 KiB precede the first block and every block may reach into that
+    /// history, so this is the linked path with a `LZ4_loadDict` before the first block. The
+    /// reference writes no dictionary id for this (it only does when a caller asks), so neither
+    /// do we.
+    ///
+    /// [`BlockMode::Linked`] and the fast parser are required: independent blocks reach a
+    /// dictionary per block through a separate mechanism (`usingDictCtx`), and the
+    /// high-compression encoders would have to walk their hash chain into it. Both are later
+    /// steps of docs/DESIGN.md §11, and asking here is better than silently producing a frame
+    /// that ignores the dictionary.
+    pub fn with_dict(
+        out: W,
+        opts: &Opts,
+        content_len: Option<u64>,
+        dict: &[u8],
+    ) -> io::Result<Self> {
+        if opts.block_mode != BlockMode::Linked {
+            return Err(unsupported(
+                "compressing with a dictionary needs linked blocks (-BD) for now",
+            ));
+        }
+        if !opts.level.is_fast() {
+            return Err(unsupported(
+                "compressing with a dictionary is ported for level 1 only",
+            ));
+        }
+        Self::build(out, opts, content_len, Some(dict))
+    }
+
+    fn build(
+        mut out: W,
+        opts: &Opts,
+        content_len: Option<u64>,
+        dict: Option<&[u8]>,
+    ) -> io::Result<Self> {
         if block_size_id(opts.block_size).is_none() {
             return Err(unsupported(
                 "frame block size: must be 64 KiB, 256 KiB, 1 MiB or 4 MiB",
@@ -267,6 +308,11 @@ impl<W: Write> Encoder<W> {
         // Enough blocks for the policy's "is multi-threading worth it" gate to answer.
         let workers = par::plan(&pool, opts.block_size * par::BLOCKS_PER_WORKER).workers;
 
+        let mut linked = linked_encoder(opts);
+        if let (Some(dict), Some(enc)) = (dict, linked.as_mut()) {
+            enc.load_dict(dict);
+        }
+
         let (desc, len) = descriptor(opts, declared);
         let hc = header_checksum(&desc[..len]);
         out.write_all(&MAGIC.to_le_bytes())?;
@@ -279,7 +325,7 @@ impl<W: Write> Encoder<W> {
             pool,
             pending: Vec::with_capacity(batch_bytes(opts.block_size, workers)),
             batch: batch_bytes(opts.block_size, workers),
-            linked: linked_encoder(opts),
+            linked,
             digest: Xxh32::new(0),
             written: 0,
             declared,
@@ -417,6 +463,18 @@ pub fn compress(src: &[u8], opts: &Opts) -> Result<Vec<u8>, Error> {
         None
     };
     let mut enc = Encoder::new(Vec::new(), opts, declared).map_err(from_io)?;
+    enc.write_all(src).map_err(from_io)?;
+    enc.finish().map_err(from_io)
+}
+
+/// [`compress`] for a frame whose blocks may reference `dict` (`lz4 -BD -D`).
+pub fn compress_with_dict(src: &[u8], opts: &Opts, dict: &[u8]) -> Result<Vec<u8>, Error> {
+    let declared = if opts.content_size {
+        Some(src.len() as u64)
+    } else {
+        None
+    };
+    let mut enc = Encoder::with_dict(Vec::new(), opts, declared, dict).map_err(from_io)?;
     enc.write_all(src).map_err(from_io)?;
     enc.finish().map_err(from_io)
 }

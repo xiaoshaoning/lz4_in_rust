@@ -242,6 +242,79 @@ fn linked_blocks_reference_their_history() {
     );
 }
 
+/// Compressing *with* a dictionary must reproduce the reference, not merely decode back: the
+/// fixtures come from `LZ4F_compressBegin_usingDict` with linked blocks (`lz4 -BD -D`), one
+/// single-block frame and one over three blocks, where the dictionary and the block history
+/// interact.
+#[test]
+fn dictionary_compression_matches_the_reference() {
+    let read = |name: &str| {
+        std::fs::read(format!(
+            "{}/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    };
+    let dict = read("frame/dict.bin");
+    let text = read("text.raw");
+    let large = read("frame/large.raw");
+
+    let base = Opts {
+        block_size: 64 << 10,
+        block_mode: BlockMode::Linked,
+        content_checksum: false,
+        ..Opts::default()
+    };
+
+    // a dictionary made of the data it is meant for pays off; one that merely looks similar can
+    // cost bytes, and the reference takes the same decision, so only the first case is asserted
+    let with_dict = compress_with_dict(&large, &base, &dict).unwrap();
+    assert!(
+        with_dict.len() < compress(&large, &base).unwrap().len(),
+        "a dictionary taken from the data itself must pay off"
+    );
+
+    for (raw, fixture, what) in [
+        (&text, "frame/text-dict.lz4", "one block"),
+        (&large, "frame/large-b4-dict.lz4", "three blocks"),
+    ] {
+        let theirs = read(fixture);
+        let ours = compress_with_dict(raw, &base, &dict).unwrap();
+        assert_eq!(ours.len(), theirs.len(), "{what}: size");
+        assert_eq!(ours, theirs, "{what}: differs from the reference");
+        let back = decompress_with_dict(&ours, &dict).unwrap();
+        assert_eq!(back.content, *raw, "{what}: roundtrip");
+        assert_eq!(back.info.block_mode, BlockMode::Linked);
+    }
+}
+
+/// What is not ported is refused rather than silently ignored: an independent-block frame would
+/// have to consult the dictionary per block through another mechanism, and the high-compression
+/// encoders would have to search the history.
+#[test]
+fn dictionary_compression_says_what_it_cannot_do() {
+    let raw = corpus(5000);
+    let dict = corpus(4096);
+    let independent = Opts {
+        block_size: 64 << 10,
+        ..Opts::default()
+    };
+    assert!(matches!(
+        compress_with_dict(&raw, &independent, &dict),
+        Err(Error::Unsupported(_))
+    ));
+    let hc = Opts {
+        block_size: 64 << 10,
+        block_mode: BlockMode::Linked,
+        level: crate::level::Level::new(9).unwrap(),
+        ..Opts::default()
+    };
+    assert!(matches!(
+        compress_with_dict(&raw, &hc, &dict),
+        Err(Error::Unsupported(_))
+    ));
+}
+
 /// Linking is ported for the fast parser; every higher level still has to produce a frame that
 /// decodes — with independent blocks, which is what the reference's `-BD -9` would not do.
 #[test]

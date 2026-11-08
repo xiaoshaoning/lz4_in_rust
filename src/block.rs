@@ -42,10 +42,12 @@ const SMALL_INPUT_LIMIT: usize = 64 * 1024 + MFLIMIT - 1;
 const TABLE_SIZE: usize = 1 << (HASH_LOG + 1);
 /// Number of hash probes before the skip step grows (`LZ4_skipTrigger`).
 const SKIP_TRIGGER: u32 = 6;
-/// Where the stateful encoder starts its offset space: one window in, exactly as the reference's
-/// `LZ4_loadDict` starts a stream. Starting above zero is what lets a dropped candidate become
-/// index 0 ("empty") instead of aliasing the oldest byte we still hold.
-const HISTORY_START: u32 = MAX_DISTANCE as u32 + 1;
+/// Where the stateful encoder starts its offset space: two windows in. One window is the room the
+/// reference's `LZ4_loadDict` reserves for a dictionary (`currentOffset += 64 KB`, so a full-size
+/// dictionary still leaves the indices above zero); the second is what keeps index 0 free as the
+/// "empty table slot" marker — a dropped candidate saturates to 0, and with a zero-based space it
+/// would alias the oldest byte still held.
+const HISTORY_START: u32 = 2 * (MAX_DISTANCE as u32 + 1);
 /// The reference renumbers its offsets once they pass `2^31` (`LZ4_renormDictT`), keeping them in
 /// a `u32` that a long stream would otherwise overflow.
 const RENORM_AT: u32 = 0x8000_0000;
@@ -493,6 +495,29 @@ impl Encoder {
             current: HISTORY_START,
             dict_size: 0,
             acceleration: acceleration.max(1),
+        }
+    }
+
+    /// `LZ4_loadDict`: forget everything and make the tail of `dict` the history.
+    ///
+    /// The reference resets the stream, advances its offset by a whole window, keeps the last
+    /// 64 KiB of the dictionary, ignores a dictionary shorter than a hash unit (8 bytes), and
+    /// fills the table every three bytes — all of which decides the output, so all of it is here.
+    pub(crate) fn load_dict(&mut self, dict: &[u8]) {
+        *self = Encoder::new(self.acceleration);
+        if dict.len() < 8 {
+            return;
+        }
+        let tail = &dict[dict.len().saturating_sub(MAX_DISTANCE + 1)..]; // 64 KiB, as the reference caps it
+        self.history.extend_from_slice(tail);
+        self.base = HISTORY_START - self.history.len() as u32;
+        self.current = HISTORY_START;
+        self.dict_size = self.history.len() as u64;
+        let mut i = 0usize;
+        while i + 8 <= self.history.len() {
+            let h = hash::<false>(&self.history, i) as usize;
+            self.table[h] = self.base + i as u32;
+            i += 3;
         }
     }
 

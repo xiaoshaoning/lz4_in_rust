@@ -472,8 +472,22 @@ R48 那处越界读（见 §11 末节）。
 4. `LZ4_isDictSmall` 在这条路径上永远为假（它需要"部分字典"），因此 `prefix_idx_limit` 那套
    分支在帧路径里不需要 —— 等 `loadDict` 落地时再补。
 
-仍然没做：HC 档（2..=12）的 linked 搜索（B 步），以及 `-D` 的**编码**（需要 `LZ4_loadDict` 与
-`dictSmall` 分支）。在这两件完成前，`-BD` 在 level ≥ 2 时写出的帧仍是"独立块"，CLI 会提示。
+`-D` 的**编码**（`lz4 -BD -D`）随后也做完了：`block::Encoder::load_dict`（`LZ4_loadDict`：
+reset、`currentOffset += 64 KB`、保留最后 64 KiB、每 3 字节填表）+ `frame::Encoder::with_dict`。
+判据是两个 fixture 都逐字节相同：单块 `frame/text-dict.lz4`（2931 字节）与三块
+`frame/large-b4-dict.lz4`（7549 字节）；40 KB 与 64 KB 两种字典也都试过。
+
+注意 `LZ4_isDictSmall` 分支**不需要**：它只为"部分加载的字典"服务，而 `seg()` 对落在窗口之外的
+索引一律返回 `None`（等于参考实现的 `prefixIdxLimit` 拒绝），两者效果相同 —— 这也是把索引空间
+从两个窗口处开始（`HISTORY_START`）换来的。
+
+仍然没做：
+1. HC 档（2..=12）的 linked 搜索（B 步）。
+2. **独立块** + 字典（参考实现走 `usingDictCtx`：每块用 `dictCtx` 的两张表查候选）。
+3. HC 档 + 字典（同理需要 B 步）。
+
+这三件都没做之前，`-BD` 在 level ≥ 2、以及 `-D` 不配 `-BD` 时，CLI 会明确报错/提示，而不是写出
+一个"看起来有字典、其实没用上"的帧。
 
 ### A 步试做记录（代码已删，结论保留）
 

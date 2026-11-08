@@ -182,6 +182,49 @@ fn declare_dictionary_id(frame: &[u8], dict: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `-D` for compression: the frame must be the reference's, byte for byte, and decode back with
+/// the same dictionary. The fixture is `LZ4F_compressBegin_usingDict` over the same input, so this
+/// pins the CLI, the frame writer and the block encoder in one assertion.
+#[test]
+fn compressing_with_a_dictionary_matches_the_reference_frame() {
+    let fixture = |name: &str| {
+        std::fs::read(format!(
+            "{}/../tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    };
+    let dict = fixture("frame/dict.bin");
+    let raw = fixture("frame/large.raw");
+    let theirs = fixture("frame/large-b4-dict.lz4");
+
+    let case = Case::new("dict-compress");
+    case.write("dict.bin", &dict);
+    case.write("large.raw", &raw);
+
+    let out = case.run(&[
+        "-f",
+        "-B4",
+        "-BD",
+        "--no-frame-crc",
+        "-D",
+        "dict.bin",
+        "large.raw",
+    ]);
+    assert!(out.ok, "{}", out.stderr);
+    assert_eq!(case.read("large.raw.lz4"), theirs, "frame differs from C's");
+
+    let out = case.run(&["-D", "dict.bin", "-d", "-c", "large.raw.lz4"]);
+    assert!(out.ok, "{}", out.stderr);
+    assert_eq!(out.stdout, raw, "roundtrip through the dictionary");
+
+    // without -BD the dictionary cannot be reached: say so instead of writing a bigger frame
+    let out = case.run(&["-B4", "-D", "dict.bin", "large.raw", "other.lz4"]);
+    assert!(!out.ok);
+    assert!(out.stderr.contains("needs linked blocks"), "{}", out.stderr);
+    assert!(!case.path("other.lz4").exists(), "half-written output");
+}
+
 #[test]
 fn compress_then_decompress_through_files() {
     let case = Case::new("roundtrip");
